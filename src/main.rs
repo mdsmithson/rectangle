@@ -118,8 +118,39 @@ enum TabAction {
     Volume(u8),
     Navigate(&'static str),
     ToggleVideoMode,
+    AgentResolution(AgentResolution),
     Preview,
     Info(AgentInfo),
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum AgentResolution {
+    #[default]
+    MatchTile,
+    MatchHost,
+    Uhd,
+    Dci2k,
+    OneK,
+}
+
+impl AgentResolution {
+    const OPTIONS: [(Self, &str); 5] = [
+        (Self::Uhd, "4K UHD (3840 × 2160)"),
+        (Self::Dci2k, "2K (2048 × 1080)"),
+        (Self::OneK, "1K (1024 × 576)"),
+        (Self::MatchTile, "Match Tile"),
+        (Self::MatchHost, "Match Host"),
+    ];
+
+    fn target(self, tile: rfb::Resolution, host: Option<egui::Vec2>) -> rfb::Resolution {
+        match self {
+            Self::MatchTile => tile,
+            Self::MatchHost => host.map_or(tile, |size| rfb::Resolution::fit(size.x, size.y)),
+            Self::Uhd => rfb::Resolution(3840, 2160),
+            Self::Dci2k => rfb::Resolution(2048, 1080),
+            Self::OneK => rfb::Resolution(1024, 576),
+        }
+    }
 }
 
 enum Job {
@@ -193,6 +224,7 @@ struct Tab {
     muted: bool,
     volume: Option<u8>,
     video_mode: bool,
+    agent_resolution: AgentResolution,
     backend: Backend,
     connection: Connection,
     id: u64,
@@ -2971,7 +3003,27 @@ impl Rectangle {
                     action = Some(TabAction::Park);
                     ui.close();
                 }
-                if tab.agent_port.is_none() {
+                if tab.agent_port.is_some() {
+                    ui.menu_button("Resolution", |ui| {
+                        for (resolution, label) in AgentResolution::OPTIONS {
+                            let response =
+                                ui.selectable_label(tab.agent_resolution == resolution, label);
+                            let response = match resolution {
+                                AgentResolution::MatchTile => {
+                                    response.on_hover_text("Follow the size of this tile.")
+                                }
+                                AgentResolution::MatchHost => response.on_hover_text(
+                                    "Use the resolution of the monitor showing Rectangle.",
+                                ),
+                                _ => response,
+                            };
+                            if response.clicked() {
+                                action = Some(TabAction::AgentResolution(resolution));
+                                ui.close();
+                            }
+                        }
+                    });
+                } else {
                     if ui
                         .selectable_label(tab.video_mode, "Smooth video (up to 1080p)")
                         .on_hover_text(
@@ -3097,6 +3149,10 @@ impl Rectangle {
                     tab.video_mode = enabled;
                 }
             }
+            TabAction::AgentResolution(resolution) => {
+                tab.agent_resolution = resolution;
+                ctx.request_repaint();
+            }
             TabAction::Preview | TabAction::Info(_) => {
                 let Some(session) = &tab.session else {
                     return;
@@ -3160,13 +3216,20 @@ impl Rectangle {
             }
             let (pane, _) = ui.allocate_exact_size(available, Sense::hover());
             let dpi = ctx.pixels_per_point();
-            let mut desired = rfb::Resolution::fit(
+            let tile = rfb::Resolution::fit(
                 ((pane.right() * dpi).round() - (pane.left() * dpi).round()).max(320.0),
                 ((pane.bottom() * dpi).round() - (pane.top() * dpi).round()).max(200.0),
             );
-            if tab.video_mode {
-                desired = desired.video_size();
-            }
+            let desired = if tab.agent_port.is_some() {
+                let host = ctx
+                    .input(|input| input.viewport().monitor_size)
+                    .map(|size| size * dpi);
+                tab.agent_resolution.target(tile, host)
+            } else if tab.video_mode {
+                tile.video_size()
+            } else {
+                tile
+            };
             let now = Instant::now();
             if tab.resize_target.is_none_or(|(size, _)| size != desired) {
                 tab.resize_target = Some((desired, now));
@@ -3301,6 +3364,27 @@ fn keysym(key: Key, modified: bool) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_resolution_selects_fixed_modes_or_tracks_tile_and_monitor_pixels() {
+        use rfb::Resolution;
+        let tile = Resolution(960, 540);
+        let host = Some(Vec2::new(2560.0, 1440.0));
+        for (mode, expected) in [
+            (AgentResolution::Uhd, Resolution(3840, 2160)),
+            (AgentResolution::Dci2k, Resolution(2048, 1080)),
+            (AgentResolution::OneK, Resolution(1024, 576)),
+            (AgentResolution::MatchHost, Resolution(2560, 1440)),
+            (AgentResolution::MatchTile, tile),
+        ] {
+            assert_eq!(mode.target(tile, host), expected);
+        }
+        assert_eq!(AgentResolution::MatchHost.target(tile, None), tile);
+        assert_eq!(
+            AgentResolution::MatchHost.target(tile, Some(Vec2::new(7680.0, 4320.0))),
+            Resolution(3965, 2230)
+        );
+    }
 
     #[test]
     fn tiled_headers_follow_their_panes_and_close_the_right_tab() {
