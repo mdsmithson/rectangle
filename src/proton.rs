@@ -152,8 +152,8 @@ impl Proton {
         }
     }
 
-    pub fn settings(&mut self, ui: &mut egui::Ui, host: &str, key: Option<&Path>) {
-        ui.heading("Proton VPN on the primary server");
+    pub fn settings(&mut self, ui: &mut egui::Ui, name: &str, host: &str, key: Option<&Path>) {
+        ui.heading(format!("Proton VPN · {name}"));
         if host.is_empty() {
             ui.label("Save an SSH connection before managing Proton VPN.");
             return;
@@ -178,9 +178,9 @@ impl Proton {
                 .hint_text(r"C:\Users\…\Downloads\wg.conf"),
         );
         ui.label(
-            egui::RichText::new(
-                "Applying a new config briefly interrupts browsing in the primary server tabs.",
-            )
+            egui::RichText::new(format!(
+                "Applying a new config briefly interrupts browsing in tabs on {name}."
+            ))
             .small()
             .color(crate::MUTED),
         );

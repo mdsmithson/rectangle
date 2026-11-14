@@ -57,7 +57,13 @@ impl HostMeter {
         ctx.request_repaint_after(self.next.unwrap().saturating_duration_since(now));
     }
 
-    pub fn show(&self, ui: &mut eframe::egui::Ui, configured: bool, compact: bool) -> bool {
+    pub fn show(
+        &self,
+        ui: &mut eframe::egui::Ui,
+        name: &str,
+        configured: bool,
+        compact: bool,
+    ) -> bool {
         use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
         let width = if compact { 124.0 } else { 163.0 };
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 29.0), egui::Sense::click());
@@ -65,7 +71,7 @@ impl HostMeter {
             egui::WidgetInfo::labeled(
                 egui::WidgetType::Button,
                 configured,
-                "Open primary server btop",
+                format!("Open btop for {name}"),
             )
         });
         let (label, ratio) = match self.reading.filter(|_| configured) {
@@ -73,17 +79,16 @@ impl HostMeter {
                 let ratio = (used as f64 / total as f64) as f32;
                 let gib = |n| n as f64 / (1_u64 << 30) as f64;
                 (
-                    format!("Primary {:.1}/{:.1} GiB", gib(used), gib(total)),
+                    format!("{name} {:.1}/{:.1} GiB", gib(used), gib(total)),
                     ratio,
                 )
             }
             None => (
                 if !configured || self.unavailable {
-                    "Primary RAM —"
+                    format!("{name} RAM —")
                 } else {
-                    "Primary RAM …"
-                }
-                .into(),
+                    format!("{name} RAM …")
+                },
                 0.0,
             ),
         };
@@ -116,7 +121,7 @@ impl HostMeter {
                 color,
             );
         }
-        painter.text(
+        painter.with_clip_rect(rect.shrink(4.0)).text(
             Pos2::new(rect.center().x, rect.top() + 10.0),
             egui::Align2::CENTER_CENTER,
             label,
@@ -124,9 +129,9 @@ impl HostMeter {
             crate::INK,
         );
         let response = response.on_hover_text(if configured {
-            "Primary server RAM · Click to open btop over SSH"
+            format!("{name} RAM · Click to open btop over SSH")
         } else {
-            "Configure the primary server in Settings to view host RAM."
+            "Configure the primary server in Settings to view host RAM.".into()
         });
         configured && response.clicked()
     }

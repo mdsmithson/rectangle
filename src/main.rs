@@ -35,7 +35,7 @@ struct Rectangle {
     parked: Vec<saved::Parked>,
     startup_parked: Vec<(Backend, std::sync::mpsc::Receiver<std::io::Result<String>>)>,
     startup_entries: Vec<(Backend, saved::Parked)>,
-    startup_errors: Vec<String>,
+    startup_errors: Vec<(Backend, String)>,
     secondary: Connection,
     secondary_entries: Vec<saved::Entry>,
     library_loaded: Option<Backend>,
@@ -72,9 +72,13 @@ enum Backend {
     Secondary,
 }
 impl Backend {
-    fn name(self) -> &'static str {
+    fn name(self, host: &str) -> &str {
         match self {
-            Self::Primary => "Primary",
+            Self::Primary => host
+                .trim()
+                .split_once('@')
+                .filter(|(user, server)| !user.is_empty() && !server.is_empty())
+                .map_or("Primary", |(user, _)| user),
             Self::Secondary => "Secondary",
         }
     }
@@ -694,9 +698,7 @@ impl Rectangle {
                 repaint.request_repaint()
             }) {
                 Ok(task) => self.startup_parked.push((backend, task)),
-                Err(err) => self
-                    .startup_errors
-                    .push(format!("{}: {err}", backend.name())),
+                Err(err) => self.startup_errors.push((backend, err.to_string())),
             }
         }
         if self.startup_parked.is_empty() {
@@ -712,17 +714,14 @@ impl Rectangle {
         self.startup_parked.retain(|(backend, task)| {
             match task.try_recv() {
                 Err(TryRecvError::Empty) => return true,
-                Err(TryRecvError::Disconnected) => self.startup_errors.push(format!(
-                    "{}: parked sessions request disconnected",
-                    backend.name(),
-                )),
+                Err(TryRecvError::Disconnected) => self
+                    .startup_errors
+                    .push((*backend, "parked sessions request disconnected".into())),
                 Ok(result) => match result.and_then(|data| saved::parse_parked(&data)) {
                     Ok(entries) => self
                         .startup_entries
                         .extend(entries.into_iter().map(|entry| (*backend, entry))),
-                    Err(err) => self
-                        .startup_errors
-                        .push(format!("{}: {err}", backend.name())),
+                    Err(err) => self.startup_errors.push((*backend, err.to_string())),
                 },
             }
             false
@@ -733,7 +732,11 @@ impl Rectangle {
     }
 
     fn finish_startup(&mut self, ctx: &egui::Context) {
-        let mut errors = std::mem::take(&mut self.startup_errors);
+        let startup_errors = std::mem::take(&mut self.startup_errors);
+        let mut errors: Vec<_> = startup_errors
+            .iter()
+            .map(|(backend, err)| format!("{}: {err}", backend.name(&self.host)))
+            .collect();
         errors.extend(self.error.take());
         let mut entries = std::mem::take(&mut self.startup_entries);
         entries
@@ -748,9 +751,9 @@ impl Rectangle {
         }
         if self.tabs.is_empty() {
             let backend = self.library_host;
-            if !errors
+            if !startup_errors
                 .iter()
-                .any(|err| err.starts_with(&format!("{}:", backend.name())))
+                .any(|(failed_backend, _)| *failed_backend == backend)
             {
                 self.refresh(ctx);
                 errors.extend(self.error.take());
@@ -1378,8 +1381,8 @@ impl Rectangle {
                     ui.label("Run on");
                     for backend in [Backend::Primary, Backend::Secondary] {
                         let label = if self.connection(backend).host.is_empty() {
-                            format!("{} (not configured)", backend.name())
-                        } else { backend.name().to_owned() };
+                            format!("{} (not configured)", backend.name(""))
+                        } else { backend.name(&self.host).to_owned() };
                         ui.selectable_value(&mut draft.backend, backend, label);
                     }
                 });
@@ -1487,8 +1490,9 @@ impl Rectangle {
                             Connections => {
                                 ui.heading("SSH connections");
                                 ui.label(RichText::new("Rectangle starts on Home. Choose a host when opening a tab.").color(MUTED));
+                                let primary_label = Backend::Primary.name(&draft.host).to_owned();
                                 for (label, example, host, key) in [
-                                    ("Primary", "user@host", &mut draft.host, &mut draft.key),
+                                    (primary_label.as_str(), "user@host", &mut draft.host, &mut draft.key),
                                     ("Secondary", "user@host", &mut draft.secondary, &mut draft.secondary_key),
                                 ] {
                                     ui.add_space(8.0);
@@ -1505,7 +1509,7 @@ impl Rectangle {
                                     });
                                 }
                             }
-                            Proton => self.proton.settings(ui, self.host.trim(), self.identity.as_deref()),
+                            Proton => self.proton.settings(ui, Backend::Primary.name(&self.host), self.host.trim(), self.identity.as_deref()),
                             Updates => { update = self.updater.show(ui); }
                         });
                     if let Some(error) = &draft.error {
@@ -1917,7 +1921,7 @@ impl Rectangle {
                 .map_or(self.library_host, |tab| tab.backend)
         };
         if self.connection(backend).host.trim().is_empty() {
-            self.error = Some(format!("Configure {} in Settings first.", backend.name()));
+            self.error = Some(format!("Configure {} in Settings first.", backend.name("")));
             return;
         }
         let input = if self.address_tab.is_some() {
@@ -2171,9 +2175,12 @@ impl Rectangle {
                         home = ui
                             .selectable_label(self.home || self.tabs.is_empty(), "Home")
                             .clicked();
-                        monitor =
-                            self.primary_memory
-                                .show(ui, !self.host.trim().is_empty(), compact);
+                        monitor = self.primary_memory.show(
+                            ui,
+                            Backend::Primary.name(&self.host),
+                            !self.host.trim().is_empty(),
+                            compact,
+                        );
                         edit = ui.button("Settings").clicked();
                         (address_submit, address_focused) =
                             self.address_bar(ui, ui.available_width(), !block_input);
@@ -2239,7 +2246,8 @@ impl Rectangle {
         if !block_input {
             if monitor && let Err(err) = session::btop(self.host.trim(), self.identity.as_deref()) {
                 self.error = Some(format!(
-                    "Could not open the primary server’s btop terminal: {err}"
+                    "Could not open btop for {}: {err}",
+                    Backend::Primary.name(&self.host)
                 ));
             }
             if home {
@@ -2489,7 +2497,7 @@ impl Rectangle {
                                     self.job.is_none() && !block_input,
                                     egui::Button::selectable(
                                         self.library_host == backend,
-                                        backend.name(),
+                                        backend.name(&self.host),
                                     ),
                                 )
                                 .clicked()
@@ -2711,7 +2719,7 @@ impl Rectangle {
     ) -> (Option<TabAction>, Option<(u64, Pos2)>, Rect) {
         let label = format!(
             "{} \u{b7} {}{}",
-            tab.backend.name(),
+            tab.backend.name(&tab.connection.host),
             tab.title,
             if tab.muted { " (muted)" } else { "" }
         );
@@ -3109,9 +3117,12 @@ impl Rectangle {
         }
         if let Some(port) = tab.agent_port {
             ui.label(
-                RichText::new(format!("Agent · {} · TCP {port}", tab.backend.name()))
-                    .small()
-                    .color(MUTED),
+                RichText::new(format!(
+                    "Agent · {} · TCP {port}",
+                    tab.backend.name(&tab.connection.host)
+                ))
+                .small()
+                .color(MUTED),
             );
         }
         if let Some(texture) = &tab.texture {
@@ -3278,6 +3289,10 @@ mod tests {
                 id,
                 title: title.into(),
                 snap: Some(snap),
+                connection: Connection {
+                    host: "Emerald@example.test".into(),
+                    key: None,
+                },
                 ..Default::default()
             })
             .collect(),
@@ -3305,9 +3320,9 @@ mod tests {
             })
             .collect();
         let locate = |name| text.iter().find(|(label, _)| *label == name).unwrap().1;
-        let left = locate("Primary · Left");
-        let upper = locate("Primary · Upper");
-        let lower = locate("Primary · Lower");
+        let left = locate("Emerald · Left");
+        let upper = locate("Emerald · Upper");
+        let lower = locate("Emerald · Lower");
         assert!(left.x + 400.0 < upper.x);
         assert_eq!(left.y, upper.y);
         assert_eq!(upper.x, lower.x);
