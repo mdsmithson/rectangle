@@ -59,6 +59,10 @@ In **Settings → Connections**, enter your own `user@host` and the path to your
 
 ## Use Rectangle
 
+In **Settings → Startup → Website theme**, choose **Light**, **Dark**, or **Firefox default** and save. Websites that use `prefers-color-scheme` can follow the selected theme. The setting applies to Browser containers when they start, including reopened saved profiles. Save and reopen an existing Browser tab to apply the change. Parked tabs keep their current theme until you save and reopen them.
+
+Light and Dark require the 0.1.3 or newer server launcher and Browser image. To upgrade, run the server installer with your existing install mode before selecting either theme.
+
 - **Browser:** The Firefox toolbar is hidden. Use Back, Forward, and Refresh on each tab. Click in the page or on its tab to link the address bar to that browser. Click away to return to new-tab mode. Use **Settings → Startup** for new Browser tabs, or edit a saved Browser's startup page from Home. **Smooth video** limits the remote display to 1080p and uses compression.
 - **Agent:** Pick a port when opening the tab. Bind your in-container service to `0.0.0.0` and use the provided `PORT` environment variable. The host port binds to loopback by default. Right-click **Open preview in Brave** to access it over SSH. To publish it on a particular LAN interface, write that server's IPv4 address to `~/.config/rectangle/agent-bind-ip` and start a new container. Agent uses regular Docker networking, outside the Browser VPN.
 - **Custom Agent images:** The server owner can enable builds with `touch ~/.config/rectangle/allow-agent-builds`. Only enable this for trusted clients. Edit the built-in recipe to create a named copy; running a custom image does not alter the built-in recipe.

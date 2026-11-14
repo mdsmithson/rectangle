@@ -44,6 +44,14 @@ user_pref("datareporting.policy.dataSubmissionEnabled", false);
 user_pref("browser.warnOnQuitShortcut", false);
 user_pref("browser.cache.disk.enable", false);
 PREFS
+case ${RECTANGLE_WEBSITE_THEME:-} in
+    dark) website_theme=0 ;;
+    light) website_theme=1 ;;
+    # Reset Rectangle's previous override in reopened profiles.
+    '') website_theme=2 ;;
+    *) echo 'Invalid Rectangle website theme.' >&2; exit 1 ;;
+esac
+printf 'user_pref("layout.css.prefers-color-scheme.content-override", %s);\n' "$website_theme" >> /tmp/profile/user.js
 if [ -S /run/rectangle/egress.sock ]; then
     socat -t 1 TCP4-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork,max-children=40 \
         UNIX-CONNECT:/run/rectangle/egress.sock </dev/null >&2 &

@@ -59,6 +59,40 @@ pub fn load_secondary() -> io::Result<(String, Option<PathBuf>)> {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum WebsiteTheme {
+    #[default]
+    Default,
+    Light,
+    Dark,
+}
+
+impl WebsiteTheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+pub fn load_website_theme() -> io::Result<WebsiteTheme> {
+    match fs::read_to_string(path()?.with_file_name("website-theme.txt")) {
+        Ok(value) => match value.trim() {
+            "default" => Ok(WebsiteTheme::Default),
+            "light" => Ok(WebsiteTheme::Light),
+            "dark" => Ok(WebsiteTheme::Dark),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unknown website theme",
+            )),
+        },
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(WebsiteTheme::Default),
+        Err(err) => Err(err),
+    }
+}
+
 pub fn load_startup_page() -> io::Result<String> {
     match fs::read_to_string(path()?.with_file_name("startup-page.txt")) {
         Ok(page) => startup_page(&page),
@@ -161,6 +195,7 @@ pub fn save(
     secondary: &str,
     secondary_key: &str,
     page: &str,
+    theme: WebsiteTheme,
 ) -> io::Result<()> {
     let dest = path()?;
     if !host.is_empty() {
@@ -176,7 +211,8 @@ pub fn save(
         secondary_key,
     )?;
     save_optional(&dest.with_file_name("oracle.txt"), "", "")?;
-    write(&dest.with_file_name("startup-page.txt"), page)
+    write(&dest.with_file_name("startup-page.txt"), page)?;
+    write(&dest.with_file_name("website-theme.txt"), theme.as_str())
 }
 
 fn save_optional(dest: &Path, host: &str, key: &str) -> io::Result<()> {

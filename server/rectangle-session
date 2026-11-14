@@ -6,8 +6,8 @@ command_prefix='exec ~/.local/bin/rectangle-session'
 # A restricted SSH key always runs this launcher. Treat its original command as data.
 case ${SSH_ORIGINAL_COMMAND:-} in
     ''|"$command_prefix")
-        [ "$#" -le 4 ] || bad_resolution
-        requested=${1:-1024x640}${2:+" $2"}${3:+" $3"}${4:+" $4"}
+        [ "$#" -le 5 ] || bad_resolution
+        requested=${1:-1024x640}${2:+" $2"}${3:+" $3"}${4:+" $4"}${5:+" $5"}
         ;;
     "$command_prefix "*) requested=${SSH_ORIGINAL_COMMAND#"$command_prefix "} ;;
     *) bad_resolution ;;
@@ -430,6 +430,7 @@ esac
 token=
 saved_id=
 startup_page=
+website_theme=
 search_terms=
 agent_port=
 image=rectangle-browser:demo
@@ -449,7 +450,16 @@ case $requested in
         if [ "$fields" != "$token" ]; then
             options=${fields#* }
             case $options in
-                url:*|search:*|agent:*) ;;
+                theme:*)
+                    theme_option=${options%% *}
+                    case $theme_option in
+                        theme:light|theme:dark) website_theme=${theme_option#theme:} ;;
+                        *) echo 'Invalid Rectangle website theme.' >&2; exit 1 ;;
+                    esac
+                    if [ "$theme_option" = "$options" ]; then options=; else options=${options#* }; fi ;;
+            esac
+            case $options in
+                ''|url:*|search:*|agent:*) ;;
                 *) saved_id=${options%% *}; valid_token "$saved_id" || bad_resolution
                    if [ "$saved_id" = "$options" ]; then options=; else options=${options#* }; fi ;;
             esac
@@ -667,6 +677,7 @@ if ! launch=$(docker run --rm --detach --init --pull=never --name "$name" --labe
     --label "rectangle.profile=$profile_id" \
     --env "RECTANGLE_WIDTH=$width" --env "RECTANGLE_HEIGHT=$height" --env "RECTANGLE_NETWORK=$network" \
     --env "RECTANGLE_STARTUP_PAGE=$startup_page" \
+    --env "RECTANGLE_WEBSITE_THEME=$website_theme" \
     --env "RECTANGLE_SEARCH_TERMS=$search_terms" \
     --network "$network_mode" --hostname rectangle --add-host rectangle:127.0.0.1 \
     --read-only --cap-drop=ALL \

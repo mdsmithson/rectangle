@@ -56,6 +56,7 @@ struct Rectangle {
     error: Option<String>,
     home: bool,
     startup_page: String,
+    website_theme: settings::WebsiteTheme,
     settings_edit: Option<SettingsEdit>,
     entries: Vec<saved::Entry>,
     job: Option<(Job, std::sync::mpsc::Receiver<std::io::Result<String>>)>,
@@ -94,6 +95,7 @@ struct SettingsEdit {
     secondary: String,
     secondary_key: String,
     startup_page: String,
+    website_theme: settings::WebsiteTheme,
     section: SettingsSection,
     error: Option<String>,
 }
@@ -238,6 +240,13 @@ fn main() -> eframe::Result {
             error.or_else(|| Some(format!("Could not load the startup page: {err}"))),
         ),
     };
+    let (website_theme, error) = match settings::load_website_theme() {
+        Ok(theme) => (theme, error),
+        Err(err) => (
+            settings::WebsiteTheme::Default,
+            error.or_else(|| Some(format!("Could not load the website theme: {err}"))),
+        ),
+    };
     let (agent_images, error) = match settings::agent_images() {
         Ok(images) => (images, error),
         Err(err) => (
@@ -267,6 +276,7 @@ fn main() -> eframe::Result {
                 host,
                 identity,
                 startup_page,
+                website_theme,
                 agent_images,
                 secondary,
                 home: true,
@@ -943,6 +953,11 @@ impl Rectangle {
             size,
             entry.as_ref().map(|entry| entry.id.as_str()),
             start,
+            if agent_port.is_some() {
+                settings::WebsiteTheme::Default
+            } else {
+                self.website_theme
+            },
             move || repaint.request_repaint(),
         ) {
             Ok(session) => {
@@ -1009,6 +1024,7 @@ impl Rectangle {
             secondary: self.secondary.host.clone(),
             secondary_key: path(&self.secondary.key),
             startup_page: self.startup_page.clone(),
+            website_theme: self.website_theme,
             section: if self.host.is_empty() && self.secondary.host.is_empty() {
                 SettingsSection::Connections
             } else {
@@ -1486,6 +1502,16 @@ impl Rectangle {
                                     .desired_width(width - 24.0)
                                     .hint_text("https://example.com"));
                                 ui.label(RichText::new("Leave blank to open the Rectangle welcome page.").color(MUTED));
+                                ui.add_space(12.0);
+                                ui.heading("Website theme");
+                                ui.horizontal(|ui| {
+                                    use settings::WebsiteTheme::{Dark, Default, Light};
+                                    ui.selectable_value(&mut draft.website_theme, Default, "Firefox default");
+                                    ui.selectable_value(&mut draft.website_theme, Light, "Light");
+                                    ui.selectable_value(&mut draft.website_theme, Dark, "Dark");
+                                });
+                                ui.label(RichText::new("Applies when a Browser container starts. Save and reopen running sessions to apply it.").color(MUTED));
+                                ui.label(RichText::new("Light and Dark require a Rectangle 0.1.3 or newer server.").color(MUTED));
                             }
                             Connections => {
                                 ui.heading("SSH connections");
@@ -1556,12 +1582,14 @@ impl Rectangle {
                             secondary,
                             draft.secondary_key.trim(),
                             &page,
+                            draft.website_theme,
                         )?;
                         Ok(page)
                     });
                 match result {
                     Ok(page) => {
                         self.startup_page = page;
+                        self.website_theme = draft.website_theme;
                         if primary_changed {
                             self.proton = proton::Proton::default();
                             self.primary_memory = memory::HostMeter::default();

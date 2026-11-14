@@ -141,7 +141,15 @@ impl Session {
         size: Resolution,
         repaint: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
-        Self::start_profile(host, identity, size, None, StartPage::Url(""), repaint)
+        Self::start_profile(
+            host,
+            identity,
+            size,
+            None,
+            StartPage::Url(""),
+            crate::settings::WebsiteTheme::Default,
+            repaint,
+        )
     }
 
     pub fn start_profile(
@@ -150,6 +158,7 @@ impl Session {
         size: Resolution,
         saved: Option<&str>,
         startup_page: StartPage<'_>,
+        theme: crate::settings::WebsiteTheme,
         repaint: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
         let mut id = [0; 16];
@@ -159,6 +168,10 @@ impl Session {
             "exec ~/.local/bin/rectangle-session {}x{} {token}",
             size.0, size.1
         );
+        if theme != crate::settings::WebsiteTheme::Default {
+            remote.push_str(" theme:");
+            remote.push_str(theme.as_str());
+        }
         if let Some(id) = saved {
             if !crate::saved::valid_id(id) {
                 return Err(io::ErrorKind::InvalidInput.into());
