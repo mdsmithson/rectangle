@@ -1511,7 +1511,7 @@ impl Rectangle {
                                     ui.selectable_value(&mut draft.website_theme, Dark, "Dark");
                                 });
                                 ui.label(RichText::new("Applies when a Browser container starts. Save and reopen running sessions to apply it.").color(MUTED));
-                                ui.label(RichText::new("Light and Dark require a Rectangle 0.1.3 or newer server.").color(MUTED));
+                                ui.label(RichText::new("Light and Dark require a Rectangle 0.1.4 or newer server.").color(MUTED));
                             }
                             Connections => {
                                 ui.heading("SSH connections");
