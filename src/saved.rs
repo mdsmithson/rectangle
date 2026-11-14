@@ -1,0 +1,190 @@
+use crate::session::ssh_command;
+use std::{
+    io::{self, Read, Write},
+    path::Path,
+    sync::mpsc::{self, Receiver},
+    thread,
+};
+
+#[derive(Clone)]
+pub struct Entry {
+    pub id: String,
+    pub title: String,
+    pub startup_page: String,
+    pub agent_port: Option<u16>,
+}
+
+#[derive(Clone)]
+pub struct Parked {
+    pub agent_port: Option<u16>,
+    pub snap: Option<crate::tiling::Snap>,
+    pub token: String,
+    pub title: String,
+    pub profile: Option<String>,
+    pub expires: u64,
+}
+
+pub fn parse_parked(output: &str) -> io::Result<Vec<Parked>> {
+    let mut lines = output.lines();
+    if lines.next() != Some("RECTPARK1") {
+        return Err(io::Error::other("The host did not return parked sessions"));
+    }
+    Ok(lines
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let [token, name, profile, expires, layout @ ..] = fields.as_slice() else {
+                return None;
+            };
+            if !valid_id(token) || !valid_id(profile) {
+                return None;
+            }
+            let name = decode(name, 160)?;
+            title(&name)?;
+            Some(Parked {
+                agent_port: layout.get(1).and_then(|port| port.parse().ok()),
+                snap: layout
+                    .first()
+                    .and_then(|slot| crate::tiling::Snap::parse(slot)),
+                token: (*token).into(),
+                title: name,
+                profile: (*profile != *token).then(|| (*profile).into()),
+                expires: expires.parse().ok()?,
+            })
+        })
+        .collect())
+}
+
+pub fn valid_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+pub fn title(input: &str) -> Option<&str> {
+    let text = input.trim();
+    (!text.is_empty() && text.len() <= 80 && !text.chars().any(char::is_control)).then_some(text)
+}
+
+pub fn encode(title: &str) -> String {
+    title.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+fn decode(encoded: &str, max_len: usize) -> Option<String> {
+    if encoded.len() > max_len || encoded.len() % 2 != 0 || !encoded.is_ascii() {
+        return None;
+    }
+    let bytes: Vec<u8> = (0..encoded.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&encoded[i..i + 2], 16).ok())
+        .collect::<Option<_>>()?;
+    String::from_utf8(bytes).ok()
+}
+
+pub fn parse(output: &str) -> io::Result<Vec<Entry>> {
+    let mut lines = output.lines();
+    if lines.next() != Some("RECTSAVED2") {
+        return Err(io::Error::other(
+            "This server does not support saved sessions",
+        ));
+    }
+    let mut list = Vec::new();
+    for line in lines.take(24) {
+        let item = (|| {
+            let (id, data) = line.split_once(' ')?;
+            if !valid_id(id) {
+                return None;
+            }
+            let (name, page) = data.split_once(' ').unwrap_or((data, ""));
+            let name = decode(name, 160)?;
+            title(&name)?;
+            let agent_port = if let Some(agent) = page.strip_prefix("agent:") {
+                let (image, port) = agent.split_once(':')?;
+                if image != "demo" && !valid_id(image) {
+                    return None;
+                }
+                Some(port.parse::<u16>().ok().filter(|port| *port >= 1024)?)
+            } else {
+                None
+            };
+            Some(Entry {
+                id: id.to_owned(),
+                title: name,
+                startup_page: decode(page, 4096).unwrap_or_default(),
+                agent_port,
+            })
+        })();
+        if let Some(item) = item {
+            list.push(item);
+        }
+    }
+    Ok(list)
+}
+
+pub fn run(
+    host: &str,
+    key: Option<&Path>,
+    request: &str,
+    repaint: impl FnOnce() + Send + 'static,
+) -> io::Result<Receiver<io::Result<String>>> {
+    run_with_input(host, key, request, None, repaint)
+}
+
+pub fn run_with_input(
+    host: &str,
+    key: Option<&Path>,
+    request: &str,
+    input: Option<Vec<u8>>,
+    repaint: impl FnOnce() + Send + 'static,
+) -> io::Result<Receiver<io::Result<String>>> {
+    let mut cmd = ssh_command(
+        host,
+        key,
+        &format!("exec ~/.local/bin/rectangle-session {request}"),
+    )?;
+    if input.is_none() {
+        cmd.stdin(std::process::Stdio::null());
+    }
+    let mut child = cmd.spawn()?;
+    let (send, receive) = mpsc::channel();
+    thread::spawn(move || {
+        let mut stderr = child.stderr.take().unwrap().take(4096);
+        let diagnostic = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            String::from_utf8_lossy(&bytes).trim().to_owned()
+        });
+        let mut data = String::new();
+        let result = (|| {
+            if let Some(input) = input {
+                child.stdin.take().unwrap().write_all(&input)?;
+            }
+            child
+                .stdout
+                .take()
+                .unwrap()
+                .take(110_001)
+                .read_to_string(&mut data)?;
+            if data.len() > 110_000 {
+                return Err(io::Error::other("Saved session response too large"));
+            }
+            if child.wait()?.success() {
+                Ok(data)
+            } else {
+                let error = diagnostic.join().unwrap_or_default();
+                Err(io::Error::other(if error.is_empty() {
+                    "Saved session request failed".into()
+                } else {
+                    error
+                }))
+            }
+        })();
+        if result.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = send.send(result);
+        repaint();
+    });
+    Ok(receive)
+}

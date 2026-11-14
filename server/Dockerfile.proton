@@ -1,0 +1,4 @@
+FROM alpine:3.24
+RUN apk add --no-cache ca-certificates iproute2-minimal nftables python3 su-exec wireguard-tools-wg wireguard-go
+COPY --chmod=0444 egress.py proton.py /opt/rectangle/
+ENTRYPOINT ["/usr/bin/python3", "-I", "/opt/rectangle/proton.py"]

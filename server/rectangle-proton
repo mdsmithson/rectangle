@@ -1,0 +1,128 @@
+#!/bin/sh
+# Administrative launcher; not exposed through the restricted Rectangle SSH key.
+set -eu
+umask 077
+dir="$HOME/.config/rectangle/proton"
+name=rectangle-proton
+is_gateway() {
+    [ "$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "$name" 2>/dev/null)" = proton ]
+}
+active() {
+    [ -S "$dir/socket/egress.sock" ] && is_gateway &&
+    timeout 3 docker exec "$name" ip -4 route show default dev wg0 | grep -q '^default\( \|$\)' &&
+    timeout 6 docker exec -u 10001:10001 "$name" python3 -I -c '
+import socket, ssl
+host = "www.cloudflare.com"
+with socket.create_connection((host, 443), timeout=3) as conn:
+    with ssl.create_default_context().wrap_socket(conn, server_hostname=host):
+        pass
+' >/dev/null 2>&1
+}
+describe() {
+    timeout 8 docker run --rm -i --pull=never --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges --memory 64m --pids-limit 16 --user 10001:10001 \
+        rectangle-proton:demo describe
+}
+lock() {
+    mkdir -p "$dir"
+    exec 8>"$dir/manage.lock"
+    flock -n 8 || { echo 'A Proton configuration change is already in progress.' >&2; exit 1; }
+}
+start_gateway() {
+    "$0" start
+}
+case ${1:-start} in
+    status)
+        if [ ! -f "$dir/client.conf" ]; then state=unconfigured
+        elif [ -f "$HOME/.config/rectangle/offline" ]; then state=offline
+        elif active; then state=active
+        else state=inactive; fi
+        printf 'RECTPROTON1\n%s\n' "$state"
+        exit ;;
+    view)
+        printf 'RECTPROTON1\n'
+        if [ -f "$dir/client.conf" ]; then describe < "$dir/client.conf"; else printf 'unconfigured\n'; fi
+        exit ;;
+    replace)
+        lock
+        stage=$(mktemp -d "$dir/import.XXXXXXXX")
+        swapped=false
+        finish() {
+            rc=$?
+            if [ "$swapped" = true ]; then
+                remove_gateway || :
+                if [ -f "$stage/old-client" ]; then mv -f "$stage/old-client" "$dir/client.conf"; else rm -f "$dir/client.conf"; fi
+                if [ -f "$stage/old-dns" ]; then mv -f "$stage/old-dns" "$dir/resolv.conf"; else rm -f "$dir/resolv.conf"; fi
+                if [ "$was_running" = true ]; then
+                    start_gateway >&2 || echo 'Previous configuration restored, but its gateway could not restart.' >&2
+                fi
+            fi
+            rm -f -- "$stage/client.conf" "$stage/resolv.conf" "$stage/old-client" "$stage/old-dns"
+            rmdir "$stage" || :
+            exit "$rc"
+        }
+        trap finish EXIT
+        trap 'exit 1' HUP INT TERM
+        timeout 10 head -c 16385 > "$stage/client.conf"
+        summary=$(describe < "$stage/client.conf")
+        printf 'nameserver %s\n' "$(printf '%s\n' "$summary" | sed -n '2p')" > "$stage/resolv.conf"
+        chmod 644 "$stage/resolv.conf"
+        if docker inspect "$name" >/dev/null 2>&1; then
+            is_gateway || exit 1
+        fi
+        was_running=$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)
+        if [ -f "$dir/client.conf" ]; then cp -p "$dir/client.conf" "$stage/old-client"; fi
+        if [ -f "$dir/resolv.conf" ]; then cp -p "$dir/resolv.conf" "$stage/old-dns"; fi
+        # An unchanged profile can be applied without interrupting a healthy tunnel.
+        if [ "$was_running" = true ] && cmp -s "$stage/client.conf" "$dir/client.conf" && active; then
+            printf 'OK\n'; exit
+        fi
+        remove_gateway() {
+            if is_gateway; then docker rm -f "$name" >/dev/null; fi
+        }
+        swapped=true
+        remove_gateway
+        mv -f "$stage/resolv.conf" "$dir/resolv.conf"
+        mv -f "$stage/client.conf" "$dir/client.conf"
+        if start_gateway >&2; then
+            i=0
+            while [ "$i" -lt 3 ]; do
+                if active; then swapped=false; printf 'OK\n'; exit; fi
+                i=$((i+1)); sleep 1
+            done
+        fi
+        echo 'The replacement did not connect. Restoring the previous configuration.' >&2
+        exit 1 ;;
+    stop)
+        is_gateway || exit 1
+        docker stop "$name" >/dev/null
+        exit
+        ;;
+    start) ;;
+    *) exit 2 ;;
+esac
+[ -s "$dir/client.conf" ] && [ ! -L "$dir/client.conf" ] && [ "$(stat -c %a -- "$dir/client.conf")" = 600 ] &&
+    [ "$(stat -c %u -- "$dir/client.conf")" != 10001 ] || { echo 'Proton client.conf must be a private file with mode 600.' >&2; exit 1; }
+[ -f "$dir/resolv.conf" ] && [ -s "$dir/resolv.conf" ] && [ ! -L "$dir/resolv.conf" ] &&
+    [ "$(stat -c %a -- "$dir/resolv.conf")" = 644 ] || { echo 'Proton resolv.conf must be readable by the proxy (mode 644).' >&2; exit 1; }
+mkdir -p -m 0733 "$dir/socket"
+if docker inspect "$name" >/dev/null 2>&1; then
+    [ "$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "$name")" = proton ] || exit 1
+    docker start "$name" >/dev/null
+else
+    docker run --detach --init --pull=never --name "$name" --restart unless-stopped \
+        --label rectangle.role=proton --network bridge --read-only \
+        --device /dev/net/tun --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE \
+        --security-opt no-new-privileges --memory 256m --cpus 1 --pids-limit 64 \
+        --tmpfs /run/wireguard:rw,nosuid,nodev,noexec,size=1m,mode=0700 \
+        --log-driver local --log-opt max-size=1m --log-opt max-file=1 --log-opt compress=false \
+        --mount "type=bind,source=$dir/client.conf,target=/run/proton/client.conf,readonly" \
+        --mount "type=bind,source=$dir/resolv.conf,target=/etc/resolv.conf,readonly" \
+        --mount "type=bind,source=$dir/socket,target=/run/rectangle" \
+        rectangle-proton:demo >/dev/null
+fi
+i=0
+while [ ! -S "$dir/socket/egress.sock" ]; do
+    i=$((i + 1)); [ "$i" -lt 60 ] || { echo 'The Proton gateway did not start.' >&2; exit 1; }
+    sleep 0.2
+done

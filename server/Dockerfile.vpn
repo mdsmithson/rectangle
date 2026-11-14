@@ -1,0 +1,4 @@
+FROM alpine:3.24
+RUN apk add --no-cache openvpn nftables python3 su-exec
+COPY --chmod=0444 egress.py vpn.py /opt/rectangle/
+ENTRYPOINT ["/usr/bin/python3", "-I", "/opt/rectangle/vpn.py"]

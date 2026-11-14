@@ -1,0 +1,10 @@
+Rectangle
+
+The container's seccomp profile is adapted from Playwright v1.56.1.
+See server/PLAYWRIGHT-LICENSE for the Apache License 2.0 and upstream
+attributions. Rectangle's changes include allowing chroot for Firefox's
+own user namespace sandbox.
+
+Firefox, Alpine Linux, TigerVNC, uBlock Origin, Freebuff and other
+third-party dependencies retain their own licenses. The source repository
+contains image build recipes; it does not bundle their binaries.

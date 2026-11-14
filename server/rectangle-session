@@ -1,0 +1,688 @@
+#!/bin/sh
+set -eu
+umask 077
+bad_resolution() { echo 'Invalid Rectangle display resolution.' >&2; exit 1; }
+command_prefix='exec ~/.local/bin/rectangle-session'
+# A restricted SSH key always runs this launcher. Treat its original command as data.
+case ${SSH_ORIGINAL_COMMAND:-} in
+    ''|"$command_prefix")
+        [ "$#" -le 4 ] || bad_resolution
+        requested=${1:-1024x640}${2:+" $2"}${3:+" $3"}${4:+" $4"}
+        ;;
+    "$command_prefix "*) requested=${SSH_ORIGINAL_COMMAND#"$command_prefix "} ;;
+    *) bad_resolution ;;
+esac
+valid_token() {
+    [ "${#1}" -eq 32 ] || return 1
+    case $1 in *[!0-9a-f]*) return 1 ;; esac
+}
+decode_startup_page() {
+    case $1 in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#1}" -le 4096 ] || return 1
+    python3 -I -c '
+import sys
+from urllib.parse import urlsplit
+
+try:
+    page = bytes.fromhex(sys.argv[1]).decode("ascii")
+    assert page and all(33 <= ord(c) <= 126 for c in page) and chr(92) not in page
+    url = urlsplit(page)
+    assert url.scheme in ("http", "https") and url.hostname and "@" not in url.netloc
+    assert page.startswith(("https://", "http://"))
+except (ValueError, AssertionError):
+    sys.exit(1)
+print(page)
+' "$1"
+}
+config="$HOME/.config/rectangle"
+saved="$config/saved"
+mkdir -p "$saved"
+sessions="$config/sessions"
+park_lock() { exec 7>"$config/parked.lock"; flock -x 7; }
+park_unlock() { exec 7>&-; }
+metadata_lock() { exec 8>"$config/saved.lock"; flock -x 8; }
+init_agent_volume() {
+    docker run --rm --pull=never --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges --memory 64m --pids-limit 16 \
+        --mount "type=volume,source=rectangle-profile-$1,target=/agent/home" \
+        --entrypoint /bin/true rectangle-agent:demo
+}
+read_parked() {
+    [ -f "$sessions/$1/parked" ] && IFS=' ' read -r expiry title keep layout < "$sessions/$1/parked"
+}
+release_browser() {
+    docker rm -f "$name" >/dev/null 2>&1 || :
+    docker rm -f "$name-egress" >/dev/null 2>&1 || :
+    if [ -n "$profile_id" ]; then
+        metadata_lock
+        if [ ! -f "$saved/$profile_id" ]; then
+            docker volume rm "rectangle-profile-$profile_id" >/dev/null 2>&1 || :
+        fi
+    fi
+    rm -f -- "$runtime/socket/egress.sock"
+    rmdir "$runtime/socket" "$runtime" 2>/dev/null || :
+    if [ -n "${reservation:-}" ]; then
+        rm -f -- "$reservation/parked" "$reservation/runtime"
+        rmdir "$reservation" 2>/dev/null || :
+    fi
+}
+load_runtime() {
+    name="rectangle-tab-$token"
+    reservation="$sessions/$token"
+    IFS= read -r runtime < "$reservation/runtime"
+    profile_id=$(docker inspect -f '{{index .Config.Labels "rectangle.profile"}}' "$name" 2>/dev/null || :)
+    if ! valid_token "$profile_id"; then profile_id=$keep; fi
+    valid_token "$profile_id" || return 1
+}
+attach_browser() {
+    docker exec -i "$name" socat -t 1 STDIO TCP4:127.0.0.1:5900,retry=20,interval=1
+}
+release_attached() {
+    park_lock
+    if [ ! -f "${reservation:-/dev/null}/parked" ]; then release_browser; fi
+}
+check_live() {
+    test "$(docker inspect -f '{{if .State.Running}}{{index .Config.Labels "rectangle.profile"}}{{end}}' "rectangle-tab-$1" 2>/dev/null || :)" = "$2"
+}
+case $requested in
+    'agent-build '*)
+        [ -f "$config/allow-agent-builds" ] || {
+            echo 'Custom Agent builds are disabled. The server owner can enable them with ~/.config/rectangle/allow-agent-builds.' >&2
+            exit 1
+        }
+        image_id=${requested#* }
+        valid_token "$image_id" || bad_resolution
+        context="$config/agent-context"
+        [ -f "$context/agent-entrypoint" ] || { echo 'Agent build files are missing on this host.' >&2; exit 1; }
+        temp=$(mktemp -d "${TMPDIR:-/tmp}/rectangle-build.XXXXXXXX")
+        trap 'rm -f -- "$temp/Dockerfile"; rmdir "$temp"' EXIT
+        timeout 10 head -c 32769 > "$temp/Dockerfile"
+        [ "$(wc -c < "$temp/Dockerfile")" -le 32768 ] || { echo 'Dockerfile exceeds 32 KiB.' >&2; exit 1; }
+        # Do not allow a recipe to select an arbitrary external build frontend.
+        if grep -qiE '^[[:space:]]*#[[:space:]]*(syntax|escape)[[:space:]]*=' "$temp/Dockerfile"; then
+            echo 'Custom Dockerfile frontend and escape directives are not supported.' >&2; exit 1
+        fi
+        timeout 300 docker build --quiet -f "$temp/Dockerfile" -t "rectangle-agent:$image_id" "$context"
+        exit ;;
+    parked-list)
+        park_lock
+        printf 'RECTPARK1\n'
+        now=$(date +%s)
+        for item in "$sessions"/*/parked; do
+            dir=${item%/parked}; id=${dir##*/}
+            valid_token "$id" && read_parked "$id" && valid_token "$keep" && check_live "$id" "$keep" || continue
+            # A live container is still resumable if its expiry worker did not clean it up.
+            if [ "$expiry" -le "$now" ]; then expiry=0; fi
+            printf '%s %s %s %s' "$id" "$title" "$keep" "$expiry"
+            agent_port=$(docker inspect -f '{{index .Config.Labels "rectangle.agent-port"}}' "rectangle-tab-$id" 2>/dev/null || :)
+            case $layout in left|right|tl|tr|bl|br) ;; *) layout=- ;; esac
+            if [ "$layout" != - ] || [ -n "$agent_port" ]; then printf ' %s' "$layout"; fi
+            if [ -n "$agent_port" ]; then printf ' %s' "$agent_port"; fi
+            printf '\n'
+        done
+        exit ;;
+    'park '*)
+        fields=${requested#* }; token=${fields%% *}; fields=${fields#* }; title=${fields%% *}
+        layout=-
+        if [ "$fields" != "$title" ]; then layout=${fields#* }; fi
+        case $layout in -|left|right|tl|tr|bl|br) ;; *) bad_resolution ;; esac
+        valid_token "$token" || bad_resolution
+        case $title in ''|*[!0-9a-f]*) bad_resolution ;; esac
+        [ "${#title}" -le 160 ] && [ "$(( ${#title} % 2 ))" -eq 0 ] || bad_resolution
+        park_lock
+        reservation="$sessions/$token"
+        keep=$(docker inspect -f '{{if .State.Running}}{{index .Config.Labels "rectangle.profile"}}{{end}}' "rectangle-tab-$token" 2>/dev/null || :)
+        valid_token "$keep" && [ -f "$reservation/runtime" ] ||
+            { echo 'This tab is not running with parking support. Open it again first.' >&2; exit 1; }
+        if [ -f "$reservation/parked" ]; then printf 'OK\n'; exit; fi
+        expiry=$(($(date +%s) + 1800))
+        printf '%s %s %s %s\n' "$expiry" "$title" "$keep" "$layout" > "$reservation/parked"
+        nohup sh -c 'sleep 1800; exec "$1" expire-park "$2" "$3"' sh "$HOME/.local/bin/rectangle-session" "$token" "$expiry" </dev/null >/dev/null 2>&1 7>&- &
+        printf 'OK\n'
+        exit ;;
+    'resume '*|'expire-park '*|'stop-park '*)
+        operation=${requested%% *}
+        fields=${requested#* }; token=${fields%% *}
+        valid_token "$token" || bad_resolution
+        park_lock
+        if ! read_parked "$token" 2>/dev/null; then
+            echo 'This parked session is no longer available.' >&2; exit 1
+        fi
+        load_runtime "$token" || exit 1
+        if [ "$operation" = expire-park ]; then
+            [ "${fields#* }" = "$expiry" ] && [ "$(date +%s)" -ge "$expiry" ] || exit 0
+        fi
+        if [ "$operation" != resume ]; then
+            # Do not race the previous SSH connection's teardown.
+            exec 9>"$config/profile-$profile_id.lock"
+            flock -n 9 || { echo 'The tab is still disconnecting. Try again in a moment.' >&2; exit 1; }
+            if [ -f "$saved/$profile_id" ] && [ "$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "$name" 2>/dev/null || :)" = browser ]; then
+                docker exec "$name" sh -c 'window=$(xdotool search --onlyvisible --class firefox | tail -n 1); [ -z "$window" ] || xdotool windowactivate --sync "$window" key --clearmodifiers alt+F4' >/dev/null 2>&1 || :
+                for attempt in 1 2 3 4 5 6 7 8 9 10; do
+                    docker inspect "$name" >/dev/null 2>&1 || break
+                    sleep .2
+                done
+            fi
+            release_browser
+            printf 'OK\n'
+            exit
+        fi
+        check_live "$token" "$profile_id" ||
+            { echo 'This parked container has stopped.' >&2; exit 1; }
+        exec 9>"$config/profile-$profile_id.lock"
+        flock -n 9 || { echo 'The tab is still disconnecting. Try again in a moment.' >&2; exit 1; }
+        rm -f -- "$reservation/parked"
+        trap release_attached EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        park_unlock
+        attach_browser
+        exit ;;
+    host-memory)
+        awk '
+            $1 == "MemTotal:" { total = $2 }
+            $1 == "MemAvailable:" { available = $2; found = 1 }
+            END {
+                if (!found || total <= 0 || available > total) exit 1
+                printf "RECTHOSTMEM1 %.0f %.0f\n", (total - available) * 1024, total * 1024
+            }
+        ' /proc/meminfo
+        exit ;;
+    host-btop)
+        [ -t 0 ] && [ -t 1 ] || { echo 'btop requires an SSH terminal.' >&2; exit 1; }
+        export XDG_CONFIG_HOME="$config/monitor"
+        mkdir -p "$XDG_CONFIG_HOME"
+        exec /bin/setpriv --no-new-privs /usr/bin/btop --utf-force ;;
+    proton-status) exec "$HOME/.local/bin/rectangle-proton" status ;;
+    proton-view) exec "$HOME/.local/bin/rectangle-proton" view ;;
+    proton-replace)
+        [ -f "$config/allow-vpn-changes" ] || {
+            echo 'Remote VPN changes are disabled by the server owner.' >&2
+            exit 1
+        }
+        exec "$HOME/.local/bin/rectangle-proton" replace ;;
+    list|list-v2)
+        metadata_lock
+        if [ "$requested" = list ]; then printf 'RECTSAVED1\n'; else printf 'RECTSAVED2\n'; fi
+        for item in "$saved"/*; do
+            id=${item##*/}
+            valid_token "$id" && [ -f "$item" ] || continue
+            IFS=' ' read -r title page < "$item" || continue
+            if [ "$requested" = list ] || [ -z "$page" ]; then
+                printf '%s %s\n' "$id" "$title"
+            else
+                printf '%s %s %s\n' "$id" "$title" "$page"
+            fi
+        done
+        exit ;;
+    'startup-page '*)
+        fields=${requested#* }; id=${fields%% *}; page=${fields#* }
+        valid_token "$id" || bad_resolution
+        if [ "$page" = - ]; then page=
+        else decode_startup_page "$page" >/dev/null || { echo 'Invalid Rectangle startup page.' >&2; exit 1; }
+        fi
+        metadata_lock
+        [ -f "$saved/$id" ] || { echo 'This saved session no longer exists.' >&2; exit 1; }
+        IFS=' ' read -r title previous < "$saved/$id"
+        case $previous in agent:*) echo 'Agent sessions have no startup page.' >&2; exit 1 ;; esac
+        printf '%s%s\n' "$title" "${page:+ $page}" > "$saved/.$id"
+        mv -f -- "$saved/.$id" "$saved/$id"
+        printf 'OK\n'
+        exit ;;
+    'save '*|'discard '*)
+        operation=${requested%% *}; fields=${requested#* }
+        running=${fields%% *}; fields=${fields#* }
+        id=${fields%% *}; title=${fields#* }
+        valid_token "$running" && valid_token "$id" || bad_resolution
+        metadata_lock
+        check_live "$running" "$id" || { echo 'This tab is no longer running.' >&2; exit 1; }
+        if [ "$operation" = discard ]; then
+            rm -f -- "$saved/$id"
+        else
+            case $title in ''|*[!0-9a-f]*) bad_resolution ;; esac
+            [ "${#title}" -le 160 ] && [ "$((${#title} % 2))" -eq 0 ] || bad_resolution
+            if [ ! -f "$saved/$id" ] && [ "$(find "$saved" -maxdepth 1 -type f | wc -l)" -ge 24 ]; then
+                echo 'Saved sessions are full. Delete one from Home before saving another.' >&2; exit 1
+            fi
+            container="rectangle-tab-$running"
+            role=$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "$container")
+            page=
+            if [ "$role" = agent ]; then
+                agent_image=$(docker inspect -f '{{.Config.Image}}' "$container")
+                port=$(docker inspect -f '{{index .Config.Labels "rectangle.agent-port"}}' "$container")
+                page="agent:${agent_image#rectangle-agent:}:$port"
+                if [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-storage"}}' "$container")" != volume ]; then
+                    init_agent_volume "$id"
+                    # Migrate the home directory of Agents started before save support.
+                    bash -o pipefail -c '
+                        docker exec "$1" tar -C /tmp/home -cf - . |
+                        docker run --rm -i --pull=never --network none --read-only --cap-drop ALL \
+                            --security-opt no-new-privileges --memory 128m --pids-limit 16 \
+                            --mount "type=volume,source=rectangle-profile-$2,target=/agent/home" \
+                            --entrypoint /bin/tar rectangle-agent:demo -C /agent/home -xf -
+                    ' migrate "$container" "$id" || { echo 'Could not save the Agent workspace.' >&2; exit 1; }
+                fi
+            else
+            docker exec "$container" sh -ec '
+                pid=$(cat /tmp/rectangle-browser-pid)
+                alive() { [ -r "/proc/$pid/stat" ] && ! grep -qE "^[0-9]+ \(.*\) Z " "/proc/$pid/stat"; }
+                if alive; then
+                    window=$(xdotool search --onlyvisible --class firefox | tail -n 1)
+                    [ -n "$window" ]
+                    xdotool windowactivate --sync "$window" key --clearmodifiers alt+F4
+                    i=0
+                    while alive; do
+                        i=$((i + 1)); [ "$i" -lt 80 ] || exit 1
+                        sleep 0.1
+                    done
+                fi
+            ' || { echo 'Firefox did not finish closing; the session was not saved.' >&2; exit 1; }
+            if [ -f "$saved/$id" ]; then IFS=' ' read -r previous page < "$saved/$id"; fi
+            fi
+            printf '%s%s\n' "$title" "${page:+ $page}" > "$saved/.$id"
+            mv -f -- "$saved/.$id" "$saved/$id"
+        fi
+        printf 'OK\n'
+        exit ;;
+    'forget '*)
+        id=${requested#* }; valid_token "$id" || bad_resolution
+        exec 9>"$config/profile-$id.lock"
+        flock -n 9 || { echo 'Close this running tab before deleting its saved session.' >&2; exit 1; }
+        [ -z "$(docker ps -q --filter "label=rectangle.profile=$id")" ] ||
+            { echo 'Stop the parked session before deleting its saved profile.' >&2; exit 1; }
+        metadata_lock
+        if [ -f "$saved/$id" ]; then
+            docker volume rm "rectangle-profile-$id" >/dev/null
+            rm -f -- "$saved/$id"
+        fi
+        printf 'OK\n'
+        exit ;;
+esac
+case $requested in
+    'agent-preview '*|'agent-preview-check '*)
+        operation=${requested%% *}
+        token=${requested#* }
+        valid_token "$token" || bad_resolution
+        name="rectangle-tab-$token"
+        metadata=$(docker inspect -f '{{if .State.Running}}{{index .Config.Labels "rectangle.role"}} {{index .Config.Labels "rectangle.tab"}} {{index .Config.Labels "rectangle.agent-port"}}{{end}}' "$name" 2>/dev/null || :)
+        case $metadata in "agent $name "*) port=${metadata##* } ;; *)
+            echo 'This Agent container is no longer running.' >&2; exit 1 ;;
+        esac
+        case $port in ''|0*|*[!0-9]*) bad_resolution ;; esac
+        [ "${#port}" -le 5 ] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || bad_resolution
+        [ -n "$(docker port "$name" "$port/tcp")" ] ||
+            { echo 'This Agent has no published preview port.' >&2; exit 1; }
+        address=$(docker inspect -f '{{with index .NetworkSettings.Networks "bridge"}}{{.IPAddress}}{{end}}' "$name")
+        [ -n "$address" ] || { echo 'This Agent has no bridge address.' >&2; exit 1; }
+        exec docker exec -i "$name" python3 -I -c '
+import os
+import socket
+import sys
+import threading
+
+port = int(sys.argv[1])
+try:
+    server = socket.create_connection((sys.argv[3], port), timeout=4)
+except OSError:
+    sys.exit(f"No service is accepting connections on Agent port {port}. Start your site first.")
+with server:
+    if sys.argv[2] == "agent-preview-check":
+        sys.exit(0)
+    server.settimeout(None)
+
+    def upload():
+        try:
+            while chunk := os.read(0, 65536):
+                server.sendall(chunk)
+        except OSError:
+            pass
+        finally:
+            try:
+                server.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+    threading.Thread(target=upload, daemon=True).start()
+    try:
+        while chunk := server.recv(65536):
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+    except OSError:
+        pass
+' "$port" "$operation" "$address" ;;
+    'agent-ports '*|'agent-health '*)
+        operation=${requested%% *}
+        token=${requested#* }
+        valid_token "$token" || bad_resolution
+        name="rectangle-tab-$token"
+        labels=$(docker inspect -f '{{index .Config.Labels "rectangle.role"}} {{index .Config.Labels "rectangle.tab"}}' "$name" 2>/dev/null || :)
+        [ "$labels" = "agent $name" ] ||
+            { echo 'This Agent container is no longer available.' >&2; exit 1; }
+        if [ "$operation" = agent-ports ]; then
+            published=$(timeout 5 docker port "$name") ||
+                { echo 'Could not read published ports.' >&2; exit 1; }
+            printf 'Published on the host\n%s\n\nInside the container\n' "${published:-None}"
+            timeout 5 docker exec -i "$name" python3 -I - <<'PY'
+import socket
+import sys
+
+rows = set()
+for proto in ("tcp", "udp"):
+    for suffix in ("", "6"):
+        family = socket.AF_INET6 if suffix else socket.AF_INET
+        try:
+            with open("/proc/net/" + proto + suffix) as table:
+                next(table)
+                for line in table:
+                    data = line.split()
+                    if data[3] != ("0A" if proto == "tcp" else "07"):
+                        continue
+                    address, port = data[1].split(":")
+                    raw = b"".join(int(address[i:i+8], 16).to_bytes(4, sys.byteorder)
+                                   for i in range(0, len(address), 8))
+                    host = socket.inet_ntop(family, raw)
+                    if suffix:
+                        host = "[" + host + "]"
+                    if int(port, 16):
+                        rows.add((proto.upper(), int(port, 16), host))
+        except FileNotFoundError:
+            continue
+if not rows:
+    print("No listening TCP or bound UDP ports.")
+for proto, port, host in sorted(rows)[:256]:
+    print(f"{proto}   {host}:{port}")
+if len(rows) > 256:
+    print(f"… {len(rows) - 256} more endpoints")
+PY
+        else
+            timeout 5 docker inspect --format 'Status: {{.State.Status}}
+Health check: {{if .State.Health}}{{.State.Health.Status}}{{else}}Not configured{{end}}
+Image: {{.Config.Image}}
+Started (UTC): {{.State.StartedAt}}
+Out of memory: {{if .State.OOMKilled}}Yes{{else}}No{{end}}
+Restarts: {{.RestartCount}}' "$name"
+            printf '\nCurrent resource use\n'
+            if ! timeout 6 docker stats --no-stream --format 'CPU: {{.CPUPerc}}
+Memory: {{.MemUsage}} ({{.MemPerc}})
+Tasks: {{.PIDs}}' "$name"; then
+                printf 'Resource statistics unavailable.\n'
+            fi
+        fi
+        exit ;;
+    'audio '*|'clipboard '*|'memory '*|'navigation '*)
+        channel=${requested%% *}
+        token=${requested#* }
+        valid_token "$token" || bad_resolution
+        name="rectangle-tab-$token"
+        label=$(docker inspect -f '{{index .Config.Labels "rectangle.audio"}}' "$name" 2>/dev/null) || exit 1
+        [ "$label" = "$token" ] || exit 1
+        case $channel in
+            audio) exec docker exec -i "$name" /opt/rectangle/audio-stream ;;
+            clipboard) exec docker exec -i "$name" python3 -I /opt/rectangle/clipboard-stream.py ;;
+            memory) exec docker exec -i "$name" python3 -I /opt/rectangle/memory-stream.py ;;
+            navigation)
+                [ "$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "$name")" = browser ] || exit 1
+                exec docker exec -i "$name" python3 -I /opt/rectangle/navigation-stream.py ;;
+        esac
+        ;;
+esac
+token=
+saved_id=
+startup_page=
+search_terms=
+agent_port=
+image=rectangle-browser:demo
+parse_agent() {
+    agent=${1#agent:}; image_id=${agent%%:*}; agent_port=${agent#*:}
+    [ "$agent" != "$image_id" ] || bad_resolution
+    case $agent_port in ''|0*|*[!0-9]*) bad_resolution ;; esac
+    [ "${#agent_port}" -le 5 ] && [ "$agent_port" -ge 1024 ] && [ "$agent_port" -le 65535 ] ||
+        { echo 'Choose an Agent port from 1024 to 65535.' >&2; exit 1; }
+    if [ "$image_id" != demo ]; then valid_token "$image_id" || bad_resolution; fi
+    image="rectangle-agent:$image_id"
+}
+case $requested in
+    *' '*)
+        fields=${requested#* }; requested=${requested%% *}
+        token=${fields%% *}
+        if [ "$fields" != "$token" ]; then
+            options=${fields#* }
+            case $options in
+                url:*|search:*|agent:*) ;;
+                *) saved_id=${options%% *}; valid_token "$saved_id" || bad_resolution
+                   if [ "$saved_id" = "$options" ]; then options=; else options=${options#* }; fi ;;
+            esac
+            case $options in
+                '') ;;
+                url:*)
+                    encoded=${options#url:}
+                    startup_page=$(decode_startup_page "$encoded") ||
+                        { echo 'Invalid Rectangle startup page.' >&2; exit 1; }
+                    ;;
+                search:*)
+                    [ -z "$saved_id" ] || bad_resolution
+                    encoded=${options#search:}
+                    case $encoded in ''|*[!0-9a-f]*) bad_resolution ;; esac
+                    [ "${#encoded}" -le 4096 ] || bad_resolution
+                    search_terms=$(python3 -I -c '
+import sys
+from unicodedata import category
+try:
+    query = bytes.fromhex(sys.argv[1]).decode("utf-8")
+    if not query.strip() or any(category(c) in ("Cc", "Zl", "Zp") for c in query):
+        sys.exit(1)
+    print(query)
+except ValueError:
+    sys.exit(1)
+' "$encoded") || { echo 'Invalid Rectangle search terms.' >&2; exit 1; }
+                    ;;
+                agent:*)
+                    [ -z "$saved_id" ] || bad_resolution
+                    parse_agent "$options"
+                    ;;
+                *) bad_resolution ;;
+            esac
+        fi
+        valid_token "$token" || bad_resolution ;;
+esac
+case $requested in *x*) width=${requested%x*}; height=${requested#*x} ;; *) bad_resolution ;; esac
+for value in "$width" "$height"; do
+    case $value in ''|0*|*[!0-9]*) bad_resolution ;; esac
+    [ "${#value}" -le 4 ] && [ "$value" -le 4096 ] || bad_resolution
+done
+[ "$width" -ge 320 ] && [ "$height" -ge 200 ] && [ "$((width * height))" -le 8847360 ] || bad_resolution
+profile="$config/session-seccomp.json"
+[ -s "$profile" ] || { echo 'Rectangle has no session seccomp profile; see setup instructions.' >&2; exit 1; }
+runtime=$(mktemp -d "${TMPDIR:-/tmp}/rectangle.XXXXXXXX")
+name="rectangle-demo-${runtime##*.}"
+[ -z "$token" ] || name="rectangle-tab-$token"
+egress="$name-egress"
+browser_started=false
+egress_started=false
+profile_id=${saved_id:-$token}
+volume=
+cleanup() {
+    park_lock
+    if [ -n "${reservation:-}" ] && [ -f "$reservation/parked" ]; then return; fi
+    if [ "$browser_started" = true ]; then docker rm -f "$name" >/dev/null 2>&1 || :; fi
+    if [ "$egress_started" = true ]; then docker rm -f "$egress" >/dev/null 2>&1 || :; fi
+    if [ -n "$volume" ]; then
+        metadata_lock
+        if [ ! -f "$saved/$profile_id" ]; then docker volume rm "$volume" >/dev/null 2>&1 || :; fi
+    fi
+    rm -f -- "$runtime/socket/egress.sock"
+    rmdir "$runtime/socket" "$runtime" 2>/dev/null || :
+}
+# Reserve the id before starting containers so a duplicate cannot remove a live session.
+if [ -n "$token" ]; then
+    mkdir -p "$config/sessions"
+    reservation="$config/sessions/$token"
+    mkdir "$reservation" || { rmdir "$runtime"; exit 1; }
+fi
+release() {
+    cleanup
+    if [ -n "${reservation:-}" ] && [ ! -f "$reservation/parked" ]; then
+        rm -f -- "$reservation/runtime"
+        rmdir "$reservation" 2>/dev/null || :
+    fi
+}
+trap release EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ -n "$profile_id" ]; then
+    exec 9>"$config/profile-$profile_id.lock"
+    flock -n 9 || { echo 'This saved session is already open.' >&2; exit 1; }
+    if [ -n "$saved_id" ]; then
+        [ -z "$(docker ps -q --filter "label=rectangle.profile=$profile_id")" ] ||
+            { echo 'This saved session is already running or parked.' >&2; exit 1; }
+        [ -f "$saved/$profile_id" ] && docker volume inspect "rectangle-profile-$profile_id" >/dev/null 2>&1 ||
+            { echo 'This saved session is missing.' >&2; exit 1; }
+        IFS=' ' read -r title page < "$saved/$saved_id"
+        case $page in
+        agent:*) parse_agent "$page" ;;
+        '') ;;
+        *)
+            startup_page=$(decode_startup_page "$page") ||
+                { echo 'Invalid saved startup page.' >&2; exit 1; }
+            ;;
+        esac
+    else
+        if docker volume inspect "rectangle-profile-$profile_id" >/dev/null 2>&1; then bad_resolution; fi
+        docker volume create --label rectangle.role=profile "rectangle-profile-$profile_id" >/dev/null
+    fi
+    volume="rectangle-profile-$profile_id"
+fi
+set --
+network=unconfigured
+vpn_profile="$config/vpn/client.ovpn"
+if [ -n "$agent_port" ]; then
+    [ ! -f "$config/offline" ] || { echo 'Agent cannot start while this host is offline.' >&2; exit 1; }
+    network=agent
+elif [ -f "$config/offline" ]; then
+    network=offline
+elif [ -f "$config/proton/client.conf" ]; then
+    network=proton
+    proton_socket="$config/proton/socket"
+    if [ -S "$proton_socket/egress.sock" ] &&
+        [ "$(docker inspect -f '{{if .State.Running}}{{index .Config.Labels "rectangle.role"}}{{end}}' rectangle-proton 2>/dev/null)" = proton ]; then
+        set -- --mount "type=bind,source=$proton_socket,target=/run/rectangle,readonly"
+    else
+        network=proton-unavailable
+    fi
+elif [ -f "$vpn_profile" ]; then
+    [ -s "$vpn_profile" ] && [ -r "$vpn_profile" ] && [ ! -L "$vpn_profile" ] || {
+        echo 'The Rectangle VPN profile is missing, empty, or unreadable.' >&2; exit 1;
+    }
+    profile_mode=$(stat -c %a -- "$vpn_profile")
+    profile_uid=$(stat -c %u -- "$vpn_profile")
+    [ "$profile_mode" = 600 ] && [ "$profile_uid" != 10001 ] || {
+        echo 'The Rectangle VPN profile must have mode 600 and a different owner than the proxy user.' >&2; exit 1;
+    }
+    [ -c /dev/net/tun ] || { echo 'The server needs /dev/net/tun for Rectangle OpenVPN.' >&2; exit 1; }
+    dns=9.9.9.9
+    if [ -f "$config/vpn/dns" ]; then dns=$(cat "$config/vpn/dns"); fi
+    case $dns in ''|*[!0-9.]*) echo 'Rectangle VPN DNS must be one IPv4 address.' >&2; exit 1 ;; esac
+    mkdir -m 0733 "$runtime/socket"
+    egress_started=true
+    docker run --rm --detach --init --pull=never --name "$egress" \
+        --label rectangle.demo=true --label rectangle.role=vpn --label "rectangle.tab=$name" \
+        --network bridge --dns "$dns" --device /dev/net/tun --read-only \
+        --cap-drop=ALL --cap-add=NET_ADMIN --cap-add=SETUID --cap-add=SETGID --cap-add=DAC_OVERRIDE \
+        --security-opt no-new-privileges --memory 256m --cpus 1 --pids-limit 64 \
+        --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m,mode=1777 \
+        --log-driver local --log-opt max-size=1m --log-opt max-file=1 --log-opt compress=false \
+        --mount "type=bind,source=$vpn_profile,target=/run/vpn/client.ovpn,readonly" \
+        --mount "type=bind,source=$runtime/socket,target=/run/rectangle" \
+        rectangle-vpn:demo >/dev/null
+    i=0
+    while [ ! -S "$runtime/socket/egress.sock" ]; do
+        i=$((i + 1)); [ "$i" -lt 60 ] || { echo 'The Rectangle VPN container did not start. Check its profile, TUN, and firewall support.' >&2; exit 1; }
+        sleep 0.1
+    done
+    network=vpn
+    set -- --mount "type=bind,source=$runtime/socket,target=/run/rectangle,readonly"
+elif [ -f "$config/cloud-egress" ]; then
+    mkdir -m 0733 "$runtime/socket"
+    egress_started=true
+    docker run --rm --detach --init --pull=never --name "$egress" \
+        --label rectangle.demo=true --label rectangle.role=egress --label "rectangle.tab=$name" \
+        --network bridge --read-only --cap-drop ALL --security-opt no-new-privileges \
+        --memory 128m --cpus 0.5 --pids-limit 64 --log-driver none \
+        --mount "type=bind,source=$runtime/socket,target=/run/rectangle" \
+        rectangle-egress:demo >/dev/null
+    i=0
+    while [ ! -S "$runtime/socket/egress.sock" ]; do
+        i=$((i + 1)); [ "$i" -lt 60 ] || { echo 'The cloud HTTPS proxy did not start.' >&2; exit 1; }
+        sleep 0.1
+    done
+    network=cloud
+    set -- --mount "type=bind,source=$runtime/socket,target=/run/rectangle,readonly"
+fi
+# No published ports, devices, shared IPC, or Docker socket in the guest.
+# The SSH session owns the containers and the exit trap removes them.
+browser_started=true
+if [ -n "$volume" ]; then
+    if [ -n "$agent_port" ]; then
+        if [ -z "$saved_id" ]; then init_agent_volume "$profile_id"; fi
+        set -- "$@" --mount "type=volume,source=$volume,target=/agent/home"
+    else
+        set -- "$@" --mount "type=volume,source=$volume,target=/profile/data"
+    fi
+fi
+role=browser
+network_mode=none
+if [ -n "$agent_port" ]; then
+    role=agent
+    bind_ip=127.0.0.1
+    if [ -f "$config/agent-bind-ip" ]; then
+        IFS= read -r bind_ip < "$config/agent-bind-ip" || exit 1
+    fi
+    python3 -I -c '
+import errno, ipaddress, socket, sys
+try:
+    address = ipaddress.IPv4Address(sys.argv[1])
+    assert not (address.is_unspecified or address.is_multicast)
+    with socket.socket() as sock:
+        sock.bind((str(address), int(sys.argv[2])))
+except (ValueError, AssertionError):
+    sys.exit("Invalid Agent bind address on this host.")
+except OSError as err:
+    if err.errno == errno.EADDRINUSE:
+        sys.exit(f"Port {sys.argv[2]} is already in use on this host. Choose a different port.")
+    sys.exit(f"Could not bind Agent port {sys.argv[2]} to {sys.argv[1]}: {err.strerror}.")
+' "$bind_ip" "$agent_port"
+    network_mode=bridge
+    set -- "$@" --publish "$bind_ip:$agent_port:$agent_port/tcp" \
+        --label "rectangle.agent-port=$agent_port" --env "PORT=$agent_port" \
+        --label rectangle.agent-storage=volume --env HOME=/agent/home \
+        --tmpfs /run/freebuff-tmp:rw,nosuid,nodev,exec,size=128m,mode=0700,uid=10001,gid=10001 \
+        --env TMPDIR=/run/freebuff-tmp \
+        --user 10001:10001 --entrypoint /opt/rectangle/agent-entrypoint
+fi
+if ! launch=$(docker run --rm --detach --init --pull=never --name "$name" --label rectangle.demo=true \
+    --label "rectangle.role=$role" --label "rectangle.tab=$name" \
+    --label "rectangle.audio=$token" \
+    --label "rectangle.profile=$profile_id" \
+    --env "RECTANGLE_WIDTH=$width" --env "RECTANGLE_HEIGHT=$height" --env "RECTANGLE_NETWORK=$network" \
+    --env "RECTANGLE_STARTUP_PAGE=$startup_page" \
+    --env "RECTANGLE_SEARCH_TERMS=$search_terms" \
+    --network "$network_mode" --hostname rectangle --add-host rectangle:127.0.0.1 \
+    --read-only --cap-drop=ALL \
+    --security-opt no-new-privileges --security-opt "seccomp=$profile" \
+    --memory 3g --cpus 2 --pids-limit 512 --shm-size 256m \
+    --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 --log-driver none \
+    "$@" "$image" 2>&1); then
+    if [ -n "$agent_port" ]; then
+        case $launch in
+            *'address already in use'*|*'port is already allocated'*)
+                echo "Port $agent_port is already in use on this host. Choose a different port." >&2
+                exit 1 ;;
+        esac
+    fi
+    printf '%s\n' "$launch" >&2
+    exit 1
+fi
+if [ -n "${reservation:-}" ]; then printf '%s\n' "$runtime" > "$reservation/runtime"; fi
+attach_browser

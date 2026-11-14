@@ -1,0 +1,20 @@
+[package]
+name = "rectangle"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "A Windows client for browser and terminal sessions on your own Linux server"
+
+[dependencies]
+eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "persistence", "wgpu"] }
+getrandom = "=0.3.4"
+flate2 = "=1.1.10"
+image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
+url = "=2.5.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Media_Audio"] }
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,108 @@
+#!/bin/sh
+set -eu
+umask 077
+mkdir -p "$HOME"
+mkdir -m 700 /tmp/rectangle-navigation
+if [ -w /profile/data ]; then
+    ln -s /profile/data /tmp/profile
+else
+    mkdir /tmp/profile
+fi
+mkdir -m 1777 /tmp/.X11-unix
+mkdir -m 700 /tmp/rectangle-pulse
+export PULSE_SERVER=unix:/tmp/rectangle-pulse/native
+cat > /tmp/rectangle-pulse/config.pa <<'PULSE'
+load-module module-native-protocol-unix socket=/tmp/rectangle-pulse/native auth-anonymous=1
+load-module module-null-sink sink_name=rectangle rate=48000 channels=2
+set-default-sink rectangle
+PULSE
+pulseaudio -n -F /tmp/rectangle-pulse/config.pa --daemonize=no --exit-idle-time=-1 \
+    --disallow-exit --disallow-module-loading --log-target=stderr </dev/null >&2 &
+Xvnc "$DISPLAY" -geometry "${RECTANGLE_WIDTH:-1024}x${RECTANGLE_HEIGHT:-640}" -depth 24 \
+    -nolisten tcp -localhost -rfbport 5900 -SecurityTypes None \
+    -AcceptSetDesktopSize=1 -AcceptCutText=0 -SendCutText=0 </dev/null >&2 &
+xvfb=$!
+i=0
+while [ ! -S /tmp/.X11-unix/X99 ]; do
+    kill -0 "$xvfb" 2>/dev/null || exit 1
+    i=$((i + 1)); [ "$i" -lt 60 ] || exit 1
+    sleep 0.1
+done
+cat > /tmp/rectangle-openbox.xml <<'XML'
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <applications>
+    <application class="*" type="normal"><maximized>yes</maximized><decor>no</decor></application>
+  </applications>
+</openbox_config>
+XML
+openbox --config-file /tmp/rectangle-openbox.xml </dev/null >&2 &
+cat > /tmp/profile/user.js <<'PREFS'
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("browser.warnOnQuitShortcut", false);
+user_pref("browser.cache.disk.enable", false);
+PREFS
+if [ -S /run/rectangle/egress.sock ]; then
+    socat -t 1 TCP4-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork,max-children=40 \
+        UNIX-CONNECT:/run/rectangle/egress.sock </dev/null >&2 &
+    cat >> /tmp/profile/user.js <<'PREFS'
+user_pref("network.proxy.type", 1);
+user_pref("network.proxy.http", "127.0.0.1");
+user_pref("network.proxy.http_port", 3128);
+user_pref("network.proxy.ssl", "127.0.0.1");
+user_pref("network.proxy.ssl_port", 3128);
+user_pref("network.proxy.no_proxies_on", "");
+user_pref("network.manage-offline-status", false);
+user_pref("network.http.http3.enable", false);
+user_pref("dom.security.https_only_mode", true);
+user_pref("network.trr.mode", 5);
+user_pref("media.peerconnection.enabled", false);
+PREFS
+fi
+cat >> /tmp/profile/user.js <<'PREFS'
+user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
+user_pref("browser.link.open_newwindow", 1);
+user_pref("browser.link.open_newwindow.restriction", 0);
+user_pref("browser.tabs.opentabfor.middleclick", false);
+PREFS
+mkdir -p /tmp/profile/chrome
+cat > /tmp/profile/chrome/userChrome.css <<'CSS'
+#navigator-toolbox { visibility: collapse !important; }
+#context-openlinkintab, #context-openlink, #context-openlinkprivate,
+#appMenu-new-tab-button2, #appMenu-new-window-button2, #appMenu-new-private-window-button2 {
+  display: none !important;
+}
+CSS
+initial_page="file:///opt/rectangle/demo.html#${RECTANGLE_NETWORK:-unconfigured}"
+[ -z "${RECTANGLE_STARTUP_PAGE:-}" ] || initial_page=about:blank
+if [ -n "${RECTANGLE_SEARCH_TERMS:-}" ]; then
+    query=$RECTANGLE_SEARCH_TERMS
+    # A leading dash must not be parsed as another Firefox flag.
+    case $query in -*) query=" $query" ;; esac
+    set -- --search "$query"
+else
+    set -- --new-window "$initial_page"
+fi
+MOZ_ENABLE_WAYLAND=0 LIBGL_ALWAYS_SOFTWARE=1 firefox --no-remote --profile /tmp/profile \
+    "$@" </dev/null >&2 &
+browser=$!
+printf '%s\n' "$browser" > /tmp/rectangle-browser-pid
+i=0
+while ! jq -e 'any(.addons[]?; .id == "uBlock0@raymondhill.net" and .active == true and .appDisabled == false and .userDisabled == false)' \
+    /tmp/profile/extensions.json >/dev/null 2>&1; do
+    kill -0 "$browser" 2>/dev/null || { echo 'Firefox exited before the session could start.' >&2; exit 1; }
+    i=$((i + 1)); [ "$i" -lt 200 ] || { echo 'Firefox did not activate uBlock Origin.' >&2; exit 1; }
+    sleep 0.1
+done
+touch /tmp/rectangle-adblock-ready
+# Wait for the blocker before navigating to the first external page.
+if [ -n "${RECTANGLE_STARTUP_PAGE:-}" ]; then
+    jq -cn --arg url "$RECTANGLE_STARTUP_PAGE" '{action:"navigate",url:$url}' > /tmp/rectangle-navigation/startup
+    mv /tmp/rectangle-navigation/startup /tmp/rectangle-navigation/command
+fi
+# Display connections come through docker exec. Keep Firefox alive between connections.
+# Keep the display alive while Save and close flushes Firefox and confirms the save.
+wait "$browser" || :
+exec sleep 60

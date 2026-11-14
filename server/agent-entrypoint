@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+umask 077
+mkdir -p "$HOME/workspace"
+mkdir -m 1777 /tmp/.X11-unix
+Xvnc "$DISPLAY" -geometry "${RECTANGLE_WIDTH:-1024}x${RECTANGLE_HEIGHT:-640}" -depth 24 \
+    -nolisten tcp -localhost -rfbport 5900 -SecurityTypes None \
+    -AcceptSetDesktopSize=1 -AcceptCutText=0 -SendCutText=0 </dev/null >&2 &
+display_pid=$!
+for i in $(seq 1 60); do
+    [ ! -S /tmp/.X11-unix/X99 ] || break
+    kill -0 "$display_pid" 2>/dev/null || exit 1
+    sleep .1
+done
+[ -S /tmp/.X11-unix/X99 ]
+cat >/tmp/agent-openbox.xml <<'XML'
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <applications><application class="XTerm"><fullscreen>yes</fullscreen></application></applications>
+</openbox_config>
+XML
+openbox --config-file /tmp/agent-openbox.xml </dev/null >&2 &
+cd "$HOME/workspace"
+git init -q
+exec xterm -fullscreen -fa 'DejaVu Sans Mono' -fs 12 -bg '#0d121a' -fg '#e1e9f0' \
+    -xrm 'XTerm*VT100.translations: #override Ctrl <Key>v: insert-selection(CLIPBOARD)' \
+    -title Freebuff -hold -e /opt/rectangle/freebuff/freebuff
