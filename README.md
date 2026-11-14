@@ -97,6 +97,12 @@ Remove the flag to allow new tabs to start a tunnel if a profile is installed. C
 
 ## Development
 
+### Update the Windows client
+
+**Settings → Updates** shows the installed version. Choose **Check for updates**, then **Update** if the official repository has a higher version. Rectangle checks out the exact revision advertised during the check and builds it with Cargo. When the build succeeds, it parks your tabs, replaces the client executable, and restarts. Updates require Git, Rust/Cargo, the same Windows build tools as the initial build, and a writable client executable directory. A failed build keeps the installed version and shows the path to the build log.
+
+The updater only changes the desktop client. Update the server separately when the release requires it. Maintainers must bump the three-part version in `Cargo.toml` and update `Cargo.lock` when publishing a client update to `main`.
+
 ```powershell
 cargo fmt --check
 cargo test --locked

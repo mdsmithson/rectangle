@@ -14,6 +14,7 @@ mod saved;
 mod session;
 mod settings;
 mod tiling;
+mod update;
 use tiling::Snap;
 
 use eframe::egui::{self, Color32, Event, Key, PointerButton, Pos2, Rect, RichText, Sense, Vec2};
@@ -60,6 +61,8 @@ struct Rectangle {
     job: Option<(Job, std::sync::mpsc::Receiver<std::io::Result<String>>)>,
     dialog: Option<Dialog>,
     quitting: bool,
+    updater: update::Updater,
+    pending_update: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -93,6 +96,7 @@ struct SettingsEdit {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
+    Updates,
     Startup,
     Connections,
     Proton,
@@ -1279,6 +1283,13 @@ impl Rectangle {
             }
             return;
         }
+        if let Some(candidate) = self.pending_update.take()
+            && let Err(error) = update::install(&candidate)
+        {
+            self.error = Some(format!("Could not restart to install the update: {error}"));
+            self.quitting = false;
+            return;
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
@@ -1432,9 +1443,10 @@ impl Rectangle {
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(mut draft) = self.settings_edit.take() {
-            use SettingsSection::{Connections, Proton, Startup};
+            use SettingsSection::{Connections, Proton, Startup, Updates};
             let mut save = false;
             let mut cancel = false;
+            let mut update = None;
             let key_path = |draft: &str| {
                 (!draft.trim().is_empty()).then(|| std::path::PathBuf::from(draft.trim()))
             };
@@ -1450,6 +1462,7 @@ impl Rectangle {
                             (Startup, "Startup"),
                             (Connections, "Connections"),
                             (Proton, "Proton VPN"),
+                            (Updates, "Updates"),
                         ] {
                             ui.selectable_value(&mut draft.section, section, label);
                         }
@@ -1493,6 +1506,7 @@ impl Rectangle {
                                 }
                             }
                             Proton => self.proton.settings(ui, self.host.trim(), self.identity.as_deref()),
+                            Updates => { update = self.updater.show(ui); }
                         });
                     if let Some(error) = &draft.error {
                         ui.label(RichText::new(error).color(Color32::LIGHT_RED));
@@ -1500,10 +1514,18 @@ impl Rectangle {
                     ui.add_space(6.0);
                     ui.separator();
                     ui.horizontal(|ui| {
-                        save = ui.add_enabled(self.job.is_none(), egui::Button::new("Save settings")).clicked();
+                        if draft.section != Updates {
+                            save = ui.add_enabled(self.job.is_none(), egui::Button::new("Save settings")).clicked();
+                        }
                         cancel = ui.button("Close").clicked();
                     });
                 });
+            if let Some(candidate) = update {
+                self.pending_update = Some(candidate);
+                self.quitting = true;
+                ctx.request_repaint();
+                return;
+            }
             if save {
                 let host = draft.host.trim();
                 let secondary = draft.secondary.trim();
@@ -1966,6 +1988,15 @@ impl Rectangle {
         self.primary_memory
             .tick(&ctx, self.host.trim(), self.identity.as_deref());
         self.poll_job(&ctx);
+        if !self.quitting {
+            self.pending_update = None;
+            if let Some(candidate) = self.updater.poll() {
+                self.pending_update = Some(candidate);
+                self.settings_edit = None;
+                self.dialog = None;
+                self.quitting = true;
+            }
+        }
         if !ui.input(|i| i.viewport().close_requested()) && !self.quitting {
             self.poll_startup(&ctx);
         }
@@ -1994,6 +2025,9 @@ impl Rectangle {
                 .as_ref()
                 .is_some_and(|(job, _)| matches!(job, Job::Close(..) | Job::IdleSave(..)));
         self.dialogs(&ctx);
+        if self.quitting {
+            return;
+        }
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.poll(&ctx);
         }
