@@ -17,6 +17,7 @@ pub struct Entry {
 #[derive(Clone)]
 pub struct Parked {
     pub agent_port: Option<u16>,
+    pub always_on: bool,
     pub snap: Option<crate::tiling::Snap>,
     pub token: String,
     pub title: String,
@@ -42,6 +43,7 @@ pub fn parse_parked(output: &str) -> io::Result<Vec<Parked>> {
             title(&name)?;
             Some(Parked {
                 agent_port: layout.get(1).and_then(|port| port.parse().ok()),
+                always_on: layout.get(2) == Some(&"always-on"),
                 snap: layout
                     .first()
                     .and_then(|slot| crate::tiling::Snap::parse(slot)),
@@ -52,6 +54,20 @@ pub fn parse_parked(output: &str) -> io::Result<Vec<Parked>> {
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+#[test]
+fn parked_list_preserves_always_on_and_reads_legacy_records() {
+    let id = "1234567890abcdef1234567890abcdef";
+    let entries = parse_parked(&format!(
+        "RECTPARK1\n{id} 4167656e74 {id} 0 - 8080 always-on\n{id} 4167656e74 {id} 0 - 8080\n"
+    ))
+    .unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].agent_port, Some(8080));
+    assert!(entries[0].always_on);
+    assert!(!entries[1].always_on);
 }
 
 pub fn valid_id(id: &str) -> bool {

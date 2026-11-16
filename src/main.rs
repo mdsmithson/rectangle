@@ -119,6 +119,7 @@ enum TabAction {
     Navigate(&'static str),
     ToggleVideoMode,
     AgentResolution(AgentResolution),
+    ToggleAlwaysOn,
     Preview,
     Info(AgentInfo),
 }
@@ -164,6 +165,7 @@ enum Job {
     StopParked(Backend),
     Close(u64, Backend),
     IdleSave(u64, Backend),
+    AlwaysOn(u64, bool),
     Forget(Backend),
     StartupPage(Backend, saved::Entry),
 }
@@ -225,6 +227,7 @@ struct Tab {
     volume: Option<u8>,
     video_mode: bool,
     agent_resolution: AgentResolution,
+    always_on: bool,
     backend: Backend,
     connection: Connection,
     id: u64,
@@ -832,6 +835,7 @@ impl Rectangle {
                     volume,
                     profile: entry.profile,
                     agent_port: entry.agent_port,
+                    always_on: entry.always_on,
                     snap: entry.snap.filter(|slot| {
                         !self
                             .tabs
@@ -855,7 +859,10 @@ impl Rectangle {
         let now = Instant::now();
         let mut save = None;
         for tab in &mut self.tabs {
-            if matches!(&self.dialog, Some(Dialog::Close(id, _)) if *id == tab.id) {
+            if tab.always_on
+                || matches!(&self.dialog, Some(Dialog::Close(id, _)) if *id == tab.id)
+                || matches!(&self.job, Some((Job::AlwaysOn(id, _), _)) if *id == tab.id)
+            {
                 continue;
             }
             let Some(last) = tab.last_input else { continue };
@@ -1262,6 +1269,18 @@ impl Rectangle {
                 }
                 if !self.quitting {
                     self.request(ctx, Job::List(backend), backend, "list-v2");
+                }
+                Ok(())
+            }),
+            Job::AlwaysOn(id, enabled) => result.and_then(|data| {
+                if data.trim() != "OK" {
+                    return Err(std::io::Error::other(
+                        "The server did not confirm Always on.",
+                    ));
+                }
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                    tab.always_on = enabled;
+                    tab.last_input = Some(Instant::now());
                 }
                 Ok(())
             }),
@@ -2629,7 +2648,9 @@ impl Rectangle {
                                             self.dialog =
                                                 Some(Dialog::StopParked(backend, entry.clone()));
                                         }
-                                        let status = if entry.expires <= now {
+                                        let status = if entry.always_on {
+                                            "Always on".into()
+                                        } else if entry.expires <= now {
                                             "Still running after expiry".into()
                                         } else {
                                             format!(
@@ -2957,6 +2978,20 @@ impl Rectangle {
         if !block_input {
             response.context_menu(|ui| {
                 if tab.agent_port.is_some() {
+                    let mut always_on = tab.always_on;
+                    if ui
+                        .add_enabled(
+                            tab.ran && tab.session.is_some() && ready,
+                            egui::Checkbox::new(&mut always_on, "Always on"),
+                        )
+                        .on_hover_text(
+                            "Keep the Agent running while idle or after Rectangle closes.",
+                        )
+                        .changed()
+                    {
+                        action = Some(TabAction::ToggleAlwaysOn);
+                        ui.close();
+                    }
                     if ui
                         .add_enabled(
                             tab.session.is_some() && ready,
@@ -3152,6 +3187,23 @@ impl Rectangle {
             TabAction::AgentResolution(resolution) => {
                 tab.agent_resolution = resolution;
                 ctx.request_repaint();
+            }
+            TabAction::ToggleAlwaysOn => {
+                if let Some(session) = &tab.session {
+                    let enabled = !tab.always_on;
+                    let command = if enabled {
+                        format!(
+                            "always-on {} {} {}",
+                            session.token,
+                            saved::encode(&tab.title),
+                            tab.snap.map_or("-", Snap::code),
+                        )
+                    } else {
+                        format!("always-on {} off", session.token)
+                    };
+                    let (id, backend) = (tab.id, tab.backend);
+                    self.request(ctx, Job::AlwaysOn(id, enabled), backend, &command);
+                }
             }
             TabAction::Preview | TabAction::Info(_) => {
                 let Some(session) = &tab.session else {
@@ -3512,14 +3564,21 @@ mod tests {
                     last_input: Some(now - Duration::from_secs(1)),
                     ..Default::default()
                 },
+                Tab {
+                    agent_port: Some(8080),
+                    always_on: true,
+                    last_input: Some(now - IDLE_LIMIT),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
         app.expire_idle_tabs(&egui::Context::default());
-        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs.len(), 3);
         assert!(app.tabs[0].idle_stopped);
         assert_eq!(app.tabs[0].error.as_deref(), Some(IDLE_MESSAGE));
         assert!(!app.tabs[1].idle_stopped);
+        assert!(!app.tabs[2].idle_stopped);
     }
 
     #[test]

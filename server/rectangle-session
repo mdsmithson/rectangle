@@ -111,6 +111,12 @@ case $requested in
         for item in "$sessions"/*/parked; do
             dir=${item%/parked}; id=${dir##*/}
             valid_token "$id" && read_parked "$id" && valid_token "$keep" && check_live "$id" "$keep" || continue
+            always_on=
+            if [ "$expiry" = 0 ]; then
+                # An attached Always on tab keeps its parking record and holds the profile lock.
+                flock -n "$config/profile-$keep.lock" true || continue
+                always_on=always-on
+            fi
             # A live container is still resumable if its expiry worker did not clean it up.
             if [ "$expiry" -le "$now" ]; then expiry=0; fi
             printf '%s %s %s %s' "$id" "$title" "$keep" "$expiry"
@@ -118,15 +124,32 @@ case $requested in
             case $layout in left|right|tl|tr|bl|br) ;; *) layout=- ;; esac
             if [ "$layout" != - ] || [ -n "$agent_port" ]; then printf ' %s' "$layout"; fi
             if [ -n "$agent_port" ]; then printf ' %s' "$agent_port"; fi
+            if [ -n "$always_on" ] && [ -n "$agent_port" ]; then printf ' %s' "$always_on"; fi
             printf '\n'
         done
         exit ;;
-    'park '*)
-        fields=${requested#* }; token=${fields%% *}; fields=${fields#* }; title=${fields%% *}
+    'park '*|'always-on '*)
+        operation=${requested%% *}
+        fields=${requested#* }; token=${fields%% *}
+        valid_token "$token" || bad_resolution
+        fields=${fields#* }
+        if [ "$operation" = always-on ] && [ "$fields" = off ]; then
+            park_lock
+            if read_parked "$token" && [ "$expiry" = 0 ]; then
+                valid_token "$keep" || exit 1
+                if flock -n "$config/profile-$keep.lock" true; then
+                    echo 'Resume this Agent tab before turning off Always on.' >&2
+                    exit 1
+                fi
+                rm -f -- "$sessions/$token/parked"
+            fi
+            printf 'OK\n'
+            exit
+        fi
+        title=${fields%% *}
         layout=-
         if [ "$fields" != "$title" ]; then layout=${fields#* }; fi
         case $layout in -|left|right|tl|tr|bl|br) ;; *) bad_resolution ;; esac
-        valid_token "$token" || bad_resolution
         case $title in ''|*[!0-9a-f]*) bad_resolution ;; esac
         [ "${#title}" -le 160 ] && [ "$(( ${#title} % 2 ))" -eq 0 ] || bad_resolution
         park_lock
@@ -134,10 +157,21 @@ case $requested in
         keep=$(docker inspect -f '{{if .State.Running}}{{index .Config.Labels "rectangle.profile"}}{{end}}' "rectangle-tab-$token" 2>/dev/null || :)
         valid_token "$keep" && [ -f "$reservation/runtime" ] ||
             { echo 'This tab is not running with parking support. Open it again first.' >&2; exit 1; }
-        if [ -f "$reservation/parked" ]; then printf 'OK\n'; exit; fi
-        expiry=$(($(date +%s) + 1800))
-        printf '%s %s %s %s\n' "$expiry" "$title" "$keep" "$layout" > "$reservation/parked"
-        nohup sh -c 'sleep 1800; exec "$1" expire-park "$2" "$3"' sh "$HOME/.local/bin/rectangle-session" "$token" "$expiry" </dev/null >/dev/null 2>&1 7>&- &
+        if [ "$operation" = always-on ]; then
+            [ "$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "rectangle-tab-$token" 2>/dev/null || :)" = agent ] ||
+                { echo 'Always on is available for running Agent tabs.' >&2; exit 1; }
+            expiry=0
+        elif [ -f "$reservation/parked" ]; then
+            if ! (read_parked "$token" && [ "$expiry" = 0 ]); then printf 'OK\n'; exit; fi
+            expiry=0
+        else
+            expiry=$(($(date +%s) + 1800))
+        fi
+        printf '%s %s %s %s\n' "$expiry" "$title" "$keep" "$layout" > "$reservation/parked.next"
+        mv -f -- "$reservation/parked.next" "$reservation/parked"
+        if [ "$expiry" != 0 ]; then
+            nohup sh -c 'sleep 1800; exec "$1" expire-park "$2" "$3"' sh "$HOME/.local/bin/rectangle-session" "$token" "$expiry" </dev/null >/dev/null 2>&1 7>&- &
+        fi
         printf 'OK\n'
         exit ;;
     'resume '*|'expire-park '*|'stop-park '*)
@@ -150,7 +184,7 @@ case $requested in
         fi
         load_runtime "$token" || exit 1
         if [ "$operation" = expire-park ]; then
-            [ "${fields#* }" = "$expiry" ] && [ "$(date +%s)" -ge "$expiry" ] || exit 0
+            [ "$expiry" != 0 ] && [ "${fields#* }" = "$expiry" ] && [ "$(date +%s)" -ge "$expiry" ] || exit 0
         fi
         if [ "$operation" != resume ]; then
             # Do not race the previous SSH connection's teardown.
@@ -171,7 +205,7 @@ case $requested in
             { echo 'This parked container has stopped.' >&2; exit 1; }
         exec 9>"$config/profile-$profile_id.lock"
         flock -n 9 || { echo 'The tab is still disconnecting. Try again in a moment.' >&2; exit 1; }
-        rm -f -- "$reservation/parked"
+        if [ "$expiry" != 0 ]; then rm -f -- "$reservation/parked"; fi
         trap release_attached EXIT
         trap 'exit 129' HUP
         trap 'exit 130' INT
@@ -235,6 +269,7 @@ case $requested in
         running=${fields%% *}; fields=${fields#* }
         id=${fields%% *}; title=${fields#* }
         valid_token "$running" && valid_token "$id" || bad_resolution
+        park_lock
         metadata_lock
         check_live "$running" "$id" || { echo 'This tab is no longer running.' >&2; exit 1; }
         if [ "$operation" = discard ]; then
@@ -282,6 +317,17 @@ case $requested in
             fi
             printf '%s%s\n' "$title" "${page:+ $page}" > "$saved/.$id"
             mv -f -- "$saved/.$id" "$saved/$id"
+        fi
+        if read_parked "$running" && [ "$expiry" = 0 ]; then
+            exec 9>"$config/profile-$id.lock"
+            if flock -n 9; then
+                token=$running
+                load_runtime "$token" || exit 1
+                exec 8>&-
+                release_browser
+            else
+                rm -f -- "$sessions/$running/parked"
+            fi
         fi
         printf 'OK\n'
         exit ;;
