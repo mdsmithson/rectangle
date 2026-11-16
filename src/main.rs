@@ -120,6 +120,7 @@ enum TabAction {
     ToggleVideoMode,
     AgentResolution(AgentResolution),
     ToggleAlwaysOn,
+    AgentMemory,
     Preview,
     Info(AgentInfo),
 }
@@ -156,6 +157,8 @@ impl AgentResolution {
 
 enum Job {
     AgentInfo(AgentInfo, String),
+    AgentMemory(u64),
+    SetAgentMemory(AgentMemoryDraft),
     OpenPreview(u64),
     BuildAgent(Backend, String, String, u16, Option<Snap>),
     List(Backend),
@@ -171,12 +174,68 @@ enum Job {
 }
 enum Dialog {
     AgentInfo(AgentInfo, String, String),
+    AgentMemory(AgentMemoryDraft),
     Rename(u64, String),
     Close(u64, String),
     Forget(Backend, saved::Entry),
     StopParked(Backend, saved::Parked),
     StartupPage(Backend, saved::Entry, String, Option<String>),
     NewTab(NewTab),
+}
+
+#[derive(Clone, Copy)]
+struct AgentMemory {
+    usage: u64,
+    limit: u64,
+    host_total: u64,
+}
+
+impl AgentMemory {
+    const MIB: u64 = 1_048_576;
+
+    fn parse(data: &str) -> std::io::Result<Self> {
+        let invalid = || std::io::Error::other("Unexpected Agent memory data from the host.");
+        let mut fields = data.split_ascii_whitespace();
+        if fields.next() != Some("RECTAGENTMEM1") {
+            return Err(invalid());
+        }
+        let mut number = || {
+            fields
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(invalid)
+        };
+        let (usage, limit, host_total) = (number()?, number()?, number()?);
+        if limit == 0 || host_total == 0 || fields.next().is_some() {
+            return Err(invalid());
+        }
+        Ok(Self {
+            usage,
+            limit,
+            host_total,
+        })
+    }
+
+    fn check_limit(self, mib: u64) -> Result<(), &'static str> {
+        if !(256..=1_048_576).contains(&mib) {
+            return Err("Enter a whole number from 256 to 1,048,576 MiB.");
+        }
+        let bytes = mib * Self::MIB;
+        if bytes < self.limit && bytes <= self.usage {
+            return Err("Set a limit above the Agent’s current memory usage.");
+        }
+        if bytes > self.limit && bytes > self.host_total {
+            return Err("The limit cannot exceed the host’s total RAM.");
+        }
+        Ok(())
+    }
+}
+
+struct AgentMemoryDraft {
+    tab: u64,
+    data: AgentMemory,
+    mib: u64,
+    message: Option<(String, bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1160,6 +1219,35 @@ impl Rectangle {
                     self.dialog = Some(Dialog::AgentInfo(info, title, data));
                 }
             }),
+            Job::AgentMemory(tab) => result.and_then(|data| {
+                let data = AgentMemory::parse(&data)?;
+                if !self.quitting {
+                    self.dialog = Some(Dialog::AgentMemory(AgentMemoryDraft {
+                        tab,
+                        mib: data.limit.div_ceil(AgentMemory::MIB),
+                        data,
+                        message: None,
+                    }));
+                }
+                Ok(())
+            }),
+            Job::SetAgentMemory(mut draft) => {
+                match result.and_then(|data| AgentMemory::parse(&data)) {
+                    Ok(data) => {
+                        draft.data = data;
+                        draft.mib = data.limit.div_ceil(AgentMemory::MIB);
+                        draft.message = Some((
+                            "Memory limit applied. The Agent is still running.".into(),
+                            false,
+                        ));
+                    }
+                    Err(error) => draft.message = Some((error.to_string(), true)),
+                }
+                if !self.quitting {
+                    self.dialog = Some(Dialog::AgentMemory(draft));
+                }
+                Ok(())
+            }
             Job::BuildAgent(backend, image, name, port, slot) => result.map(|_| {
                 if !self.quitting {
                     let count = self.tabs.len();
@@ -1705,6 +1793,7 @@ impl Rectangle {
         let mut choice = 0;
         let heading = match dialog {
             Dialog::AgentInfo(info, ..) => info.label(),
+            Dialog::AgentMemory(_) => "Agent memory limit",
             Dialog::Rename(..) => "Rename tab",
             Dialog::Close(..) => "Close tab",
             Dialog::Forget(..) => "Delete saved session",
@@ -1729,6 +1818,42 @@ impl Rectangle {
                         if ui.button("Close").clicked() || ctx.input(|input| input.key_pressed(Key::Escape)) {
                             choice = 3;
                         }
+                        return;
+                    }
+                    Dialog::AgentMemory(draft) => {
+                        let gib = |bytes| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        if let Some(tab) = self.tabs.iter().find(|tab| tab.id == draft.tab) {
+                            ui.label(RichText::new(&tab.title).strong());
+                        }
+                        ui.label(format!(
+                            "{:.2} GiB used / {:.2} GiB limit · {:.2} GiB host RAM",
+                            gib(draft.data.usage), gib(draft.data.limit), gib(draft.data.host_total)
+                        ));
+                        ui.horizontal(|ui| {
+                            ui.label("New limit");
+                            if ui.add(egui::DragValue::new(&mut draft.mib).range(256..=1_048_576).suffix(" MiB")).changed() {
+                                draft.message = None;
+                            }
+                        });
+                        ui.label("Decreasing the limit leaves less room for running processes.");
+                        let validation = draft.data.check_limit(draft.mib);
+                        if let Err(error) = validation {
+                            ui.colored_label(Color32::LIGHT_RED, error);
+                        }
+                        if let Some((message, error)) = &draft.message {
+                            ui.colored_label(if *error { Color32::LIGHT_RED } else { INK }, message);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(self.job.is_none() && validation.is_ok(), egui::Button::new("Apply")).clicked() {
+                                choice = 1;
+                            }
+                            if ui.add_enabled(self.job.is_none(), egui::Button::new("Refresh usage")).clicked() {
+                                choice = 5;
+                            }
+                            if ui.button("Close").clicked() || ctx.input(|input| input.key_pressed(Key::Escape)) {
+                                choice = 3;
+                            }
+                        });
                         return;
                     }
                     Dialog::NewTab(_) => unreachable!(),
@@ -1823,6 +1948,26 @@ impl Rectangle {
             });
         match (choice, dialog) {
             (0, dialog) => self.dialog = Some(dialog),
+            (action @ (1 | 5), Dialog::AgentMemory(draft)) => {
+                if let Some(tab) = self.tabs.iter().find(|tab| tab.id == draft.tab)
+                    && let Some(session) = &tab.session
+                    && tab.agent_port.is_some()
+                {
+                    let (job, cmd) = if action == 1 {
+                        let cmd = format!("agent-memory {} {}", session.token, draft.mib);
+                        (Job::SetAgentMemory(draft), cmd)
+                    } else {
+                        (
+                            Job::AgentMemory(draft.tab),
+                            format!("agent-memory {}", session.token),
+                        )
+                    };
+                    self.request(ctx, job, tab.backend, &cmd);
+                } else {
+                    self.error = Some("This Agent is no longer running.".into());
+                }
+            }
+            (3, Dialog::AgentMemory(_)) => {}
             (4, Dialog::Close(id, _)) => {
                 if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
                     self.park_tab(ctx, index);
@@ -3014,6 +3159,16 @@ impl Rectangle {
                             ui.close();
                         }
                     }
+                    if ui
+                        .add_enabled(
+                            tab.ran && tab.session.is_some() && ready,
+                            egui::Button::new("Memory limit…"),
+                        )
+                        .clicked()
+                    {
+                        action = Some(TabAction::AgentMemory);
+                        ui.close();
+                    }
                     ui.separator();
                 }
                 ui.menu_button("Snap tab", |ui| {
@@ -3205,12 +3360,13 @@ impl Rectangle {
                     self.request(ctx, Job::AlwaysOn(id, enabled), backend, &command);
                 }
             }
-            TabAction::Preview | TabAction::Info(_) => {
+            TabAction::Preview | TabAction::Info(_) | TabAction::AgentMemory => {
                 let Some(session) = &tab.session else {
                     return;
                 };
                 let (job, command) = match action {
                     TabAction::Preview => (Job::OpenPreview(tab.id), "agent-ports"),
+                    TabAction::AgentMemory => (Job::AgentMemory(tab.id), "agent-memory"),
                     TabAction::Info(info) => {
                         (Job::AgentInfo(info, tab.title.clone()), info.command())
                     }

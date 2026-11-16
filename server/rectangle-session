@@ -36,11 +36,22 @@ print(page)
 }
 config="$HOME/.config/rectangle"
 saved="$config/saved"
+agent_memory="$config/agent-memory"
 mkdir -p "$saved"
 sessions="$config/sessions"
 park_lock() { exec 7>"$config/parked.lock"; flock -x 7; }
 park_unlock() { exec 7>&-; }
 metadata_lock() { exec 8>"$config/saved.lock"; flock -x 8; }
+valid_memory_mib() {
+    case $1 in ''|0*|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 7 ] && [ "$1" -ge 256 ] && [ "$1" -le 1048576 ]
+}
+remember_agent_memory() {
+    mkdir -p "$agent_memory"
+    printf '%s\n' "$2" > "$agent_memory/.$1"
+    mv -f -- "$agent_memory/.$1" "$agent_memory/$1"
+}
+agent_memory_error() { printf '%s\n' "$1" >&2; exit 1; }
 init_agent_volume() {
     docker run --rm --pull=never --network none --read-only --cap-drop ALL \
         --security-opt no-new-privileges --memory 64m --pids-limit 16 \
@@ -273,7 +284,7 @@ case $requested in
         metadata_lock
         check_live "$running" "$id" || { echo 'This tab is no longer running.' >&2; exit 1; }
         if [ "$operation" = discard ]; then
-            rm -f -- "$saved/$id"
+            rm -f -- "$saved/$id" "$agent_memory/$id"
         else
             case $title in ''|*[!0-9a-f]*) bad_resolution ;; esac
             [ "${#title}" -le 160 ] && [ "$((${#title} % 2))" -eq 0 ] || bad_resolution
@@ -297,6 +308,12 @@ case $requested in
                             --mount "type=volume,source=rectangle-profile-$2,target=/agent/home" \
                             --entrypoint /bin/tar rectangle-agent:demo -C /agent/home -xf -
                     ' migrate "$container" "$id" || { echo 'Could not save the Agent workspace.' >&2; exit 1; }
+                fi
+                bytes=$(docker inspect -f '{{.HostConfig.Memory}}' "$container")
+                case $bytes in ''|*[!0-9]*) agent_memory_error 'Could not read the Agent memory limit.' ;; esac
+                mib=$((bytes / 1048576))
+                if valid_memory_mib "$mib" && [ "$((mib * 1048576))" -eq "$bytes" ]; then
+                    remember_agent_memory "$id" "$mib"
                 fi
             else
             docker exec "$container" sh -ec '
@@ -340,7 +357,7 @@ case $requested in
         metadata_lock
         if [ -f "$saved/$id" ]; then
             docker volume rm "rectangle-profile-$id" >/dev/null
-            rm -f -- "$saved/$id"
+            rm -f -- "$saved/$id" "$agent_memory/$id"
         fi
         printf 'OK\n'
         exit ;;
@@ -397,6 +414,55 @@ with server:
     except OSError:
         pass
 ' "$port" "$operation" "$address" ;;
+    'agent-memory '*)
+        fields=${requested#* }; token=${fields%% *}
+        valid_token "$token" || bad_resolution
+        mib=
+        if [ "$fields" != "$token" ]; then
+            mib=${fields#* }
+            valid_memory_mib "$mib" || agent_memory_error 'Enter a whole memory limit of at least 256 MiB.'
+            park_lock
+            metadata_lock
+        fi
+        name="rectangle-tab-$token"
+        identity=$(timeout 5 docker inspect -f '{{if .State.Running}}{{index .Config.Labels "rectangle.role"}} {{index .Config.Labels "rectangle.tab"}} {{.Id}} {{index .Config.Labels "rectangle.profile"}} {{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}{{end}}' "$name" 2>/dev/null) ||
+            agent_memory_error 'This Agent container is no longer running.'
+        read -r role label container profile_id limit swap <<EOF
+$identity
+EOF
+        [ "$role" = agent ] && [ "$label" = "$name" ] && valid_token "$profile_id" ||
+            agent_memory_error 'This Agent container is no longer running.'
+        usage=$(timeout 5 docker exec "$container" cat /sys/fs/cgroup/memory.current) ||
+            agent_memory_error 'Could not read the Agent’s current memory use.'
+        case $usage in ''|*[!0-9]*) agent_memory_error 'Could not read the Agent’s current memory use.' ;; esac
+        case $limit in ''|0|*[!0-9]*) agent_memory_error 'Could not read the Agent memory limit.' ;; esac
+        total=$(awk '/^MemTotal:/ {printf "%.0f", $2 * 1024}' /proc/meminfo)
+        case $total in ''|0|*[!0-9]*) agent_memory_error 'Could not read host memory capacity.' ;; esac
+        if [ -n "$mib" ]; then
+            bytes=$((mib * 1048576))
+            if [ "$bytes" -lt "$limit" ] && [ "$bytes" -le "$usage" ]; then
+                agent_memory_error 'The new limit must be above current usage. Free memory in the Agent and try again.'
+            fi
+            if [ "$bytes" -gt "$limit" ] && [ "$bytes" -gt "$total" ]; then
+                agent_memory_error 'The new limit exceeds the host’s total RAM.'
+            fi
+            if [ "$bytes" -ne "$limit" ]; then
+                set -- --memory "$bytes"
+                # Preserve the existing amount of allowed swap when Docker caps it.
+                if [ "$swap" -gt 0 ]; then
+                    swap_headroom=$((swap > limit ? swap - limit : 0))
+                    set -- "$@" --memory-swap "$((bytes + swap_headroom))"
+                fi
+                timeout 15 docker update "$@" "$container" >/dev/null ||
+                    agent_memory_error 'Docker could not confirm the memory change. Check the current limit before retrying.'
+            fi
+            if [ -f "$saved/$profile_id" ]; then
+                remember_agent_memory "$profile_id" "$mib"
+            fi
+            limit=$bytes
+        fi
+        printf 'RECTAGENTMEM1 %s %s %s\n' "$usage" "$limit" "$total"
+        exit ;;
     'agent-ports '*|'agent-health '*)
         operation=${requested%% *}
         token=${requested#* }
@@ -479,6 +545,7 @@ startup_page=
 website_theme=
 search_terms=
 agent_port=
+memory_mib=3072
 image=rectangle-browser:demo
 parse_agent() {
     agent=${1#agent:}; image_id=${agent%%:*}; agent_port=${agent#*:}
@@ -597,7 +664,13 @@ if [ -n "$profile_id" ]; then
             { echo 'This saved session is missing.' >&2; exit 1; }
         IFS=' ' read -r title page < "$saved/$saved_id"
         case $page in
-        agent:*) parse_agent "$page" ;;
+        agent:*)
+            parse_agent "$page"
+            if [ -f "$agent_memory/$saved_id" ]; then
+                IFS= read -r remembered < "$agent_memory/$saved_id" || remembered=
+                if valid_memory_mib "$remembered"; then memory_mib=$remembered; fi
+            fi
+            ;;
         '') ;;
         *)
             startup_page=$(decode_startup_page "$page") ||
@@ -728,7 +801,7 @@ if ! launch=$(docker run --rm --detach --init --pull=never --name "$name" --labe
     --network "$network_mode" --hostname rectangle --add-host rectangle:127.0.0.1 \
     --read-only --cap-drop=ALL \
     --security-opt no-new-privileges --security-opt "seccomp=$profile" \
-    --memory 3g --cpus 2 --pids-limit 512 --shm-size 256m \
+    --memory "${memory_mib}m" --cpus 2 --pids-limit 512 --shm-size 256m \
     --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 --log-driver none \
     "$@" "$image" 2>&1); then
     if [ -n "$agent_port" ]; then
