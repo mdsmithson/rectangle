@@ -484,7 +484,7 @@ EOF
                 exec python3 -I "$assets/smb.py" agent "$token" disable "$folder" ;;
             *) exit 1 ;;
         esac ;;
-    'agent-view '*|'agent-files '*|'agent-upload '*|'agent-file '*|'agent-clipboard '*)
+    'agent-view '*|'agent-files '*|'agent-upload '*|'agent-file '*|'agent-clipboard '*|'agent-cwd '*)
         operation=${requested%% *}
         fields=${requested#* }
         token=${fields%% *}
@@ -496,6 +496,14 @@ EOF
 ${fields#* }
 EOF
         case $operation in
+            agent-cwd)
+                [ -z "$path$file$size$extra" ] || exit 1
+                case $action in
+                    main) display=99 ;; sh) display=100 ;; freebuff) display=101 ;;
+                    edit10[3-9]|edit11[0-9]|edit12[0-7]) display=${action#edit} ;;
+                    *) exit 1 ;;
+                esac
+                exec docker exec -i "$name" python3 -I -c "$(cat "$assets/terminal-cwd.py")" "$display" "$action" ;;
             agent-clipboard)
                 [ -z "$path$file$size$extra" ] || exit 1
                 case $action in

@@ -14,6 +14,7 @@ mod rfb;
 mod saved;
 mod session;
 mod settings;
+mod terminal;
 mod tiling;
 mod update;
 use tiling::Snap;
@@ -46,6 +47,7 @@ struct Rectangle {
     address_tab: Option<u64>,
     address_rect: Option<Rect>,
     address_headers: Vec<(u64, Rect)>,
+    terminal_directory: Option<(u64, Option<terminal::WorkingDirectory>)>,
     proton: proton::Proton,
     primary_memory: memory::HostMeter,
     primary_disk: memory::HostMeter,
@@ -152,6 +154,18 @@ impl AgentView {
             Self::Freebuff => "Freebuff Terminal",
             Self::Files => "File Manager",
             Self::Shell => "SH Terminal",
+        }
+    }
+}
+
+impl Tab {
+    fn terminal_view(&self) -> Option<String> {
+        self.agent_port?;
+        match (self.agent_view, self.agent_owner, self.file_editor) {
+            (AgentView::Files, _, _) => None,
+            (_, _, Some(display)) => Some(format!("edit{display}")),
+            (_, None, _) => Some("main".into()),
+            (view, Some(_), _) => Some(view.command().into()),
         }
     }
 }
@@ -1305,6 +1319,10 @@ impl Rectangle {
         self.active = index;
         self.home = false;
         self.tabs[index].clipboard_error = None;
+        if self.tabs[index].terminal_view().is_some() && self.tabs[index].session.is_some() {
+            self.address_tab = Some(self.tabs[index].id);
+            self.browser_address.clear();
+        }
     }
 
     fn edit_settings(&mut self) {
@@ -2408,10 +2426,37 @@ impl Rectangle {
             .address_tab
             .and_then(|id| self.tabs.iter().find(|tab| tab.id == id));
         let files = tab.is_some_and(|tab| tab.agent_view == AgentView::Files);
+        let view = tab.and_then(Tab::terminal_view);
+        let watch = tab
+            .zip(view.as_deref())
+            .and_then(|(tab, mode)| Some((tab, mode, tab.session.as_ref()?)));
+        if self.terminal_directory.as_ref().map(|(id, _)| *id) != watch.map(|(tab, _, _)| tab.id) {
+            self.terminal_directory = watch.map(|(tab, mode, session)| {
+                let repaint = ui.ctx().clone();
+                let directory = terminal::WorkingDirectory::start(
+                    tab.connection.host.trim(),
+                    tab.connection.key.as_deref(),
+                    &session.token,
+                    mode,
+                    move || repaint.request_repaint(),
+                )
+                .ok();
+                (tab.id, directory)
+            });
+        }
         let enabled = enabled
             && self.job.is_none()
             && (self.address_tab.is_some() || self.tabs.len() < MAX_TABS);
-        if !focused && self.address_tab.is_some() {
+        if let Some((tab, mode, session)) = watch {
+            self.browser_address = self
+                .terminal_directory
+                .as_ref()
+                .and_then(|(_, directory)| directory.as_ref())
+                .and_then(|directory| {
+                    directory.address(tab.connection.host.trim(), &session.token, mode)
+                })
+                .unwrap_or_default();
+        } else if !focused && self.address_tab.is_some() {
             self.browser_address = tab
                 .and_then(|tab| {
                     if files {
@@ -2439,7 +2484,7 @@ impl Rectangle {
         } else {
             &mut self.new_tab_address
         };
-        let submit = if focused && enabled {
+        let submit = if focused && enabled && view.is_none() {
             ui.input(|input| {
                 input.events.iter().find_map(|event| match event {
                     Event::Key {
@@ -2457,30 +2502,42 @@ impl Rectangle {
         } else {
             None
         };
-        let response = ui
-            .add_enabled(
+        let has_address = !address.trim().is_empty();
+        let editor = |ui: &mut egui::Ui, text: &mut dyn egui::TextBuffer| {
+            ui.add_enabled(
                 enabled,
-                egui::TextEdit::singleline(address)
+                egui::TextEdit::singleline(text)
                     .id(id)
                     .background_color(fill)
                     .desired_width(width)
                     .margin(egui::Margin::symmetric(12, 7))
-                    .hint_text(if width < 190.0 {
+                    .hint_text(if view.is_some() {
+                        "Terminal working directory"
+                    } else if width < 190.0 {
                         "Search or URL"
                     } else {
                         "Search or enter a URL"
                     }),
             )
-            .on_hover_text(if files {
-                "Enter an Agent folder address or an absolute folder path."
-            } else if self.address_tab.is_some() {
-                "Enter navigates this tab. Ctrl+Enter completes a site name."
-            } else {
-                "Enter opens a new tab. Ctrl+Enter completes a site name."
-            });
+        };
+        let response = if view.is_some() {
+            let mut read_only = address.as_str();
+            editor(ui, &mut read_only)
+        } else {
+            editor(ui, address)
+        }
+        .on_hover_text(if view.is_some() {
+            "Current working directory of this terminal. Select and copy the address."
+        } else if files {
+            "Enter an Agent folder address or an absolute folder path."
+        } else if self.address_tab.is_some() {
+            "Enter navigates this tab. Ctrl+Enter completes a site name."
+        } else {
+            "Enter opens a new tab. Ctrl+Enter completes a site name."
+        });
         self.address_rect = Some(response.rect);
         (
-            submit.filter(|_| !address.trim().is_empty()),
+            submit.filter(|_| has_address),
             focused || response.has_focus(),
         )
     }
@@ -2520,6 +2577,9 @@ impl Rectangle {
             .address_tab
             .and_then(|id| self.tabs.iter_mut().find(|tab| tab.id == id))
         {
+            if tab.terminal_view().is_some() {
+                return;
+            }
             if tab.agent_view == AgentView::Files {
                 if let Some(session) = &tab.session {
                     self.error = tab
@@ -2703,8 +2763,7 @@ impl Rectangle {
                                 tab.snap.is_some()
                             } else {
                                 *i == self.active
-                            }) && (tab.agent_port.is_none() || tab.agent_view == AgentView::Files)
-                                && tab.session.is_some()
+                            }) && tab.session.is_some()
                                 && tab.page_rect.is_some_and(|rect| rect.contains(pos))
                         })
                     })
@@ -2818,9 +2877,7 @@ impl Rectangle {
                                     self.job.is_none(),
                                     &mut self.dragging_tab,
                                 );
-                                if (tab.agent_port.is_none() || tab.agent_view == AgentView::Files)
-                                    && tab.session.is_some()
-                                {
+                                if tab.session.is_some() {
                                     self.address_headers.push((tab.id, header));
                                 }
                                 if let Some(action) = action {
@@ -3022,9 +3079,7 @@ impl Rectangle {
                             self.job.is_none(),
                             &mut self.dragging_tab,
                         );
-                        if (tab.agent_port.is_none() || tab.agent_view == AgentView::Files)
-                            && tab.session.is_some()
-                        {
+                        if tab.session.is_some() {
                             self.address_headers.push((tab.id, header));
                         }
                         if let Some(action) = action {
@@ -3720,9 +3775,7 @@ impl Rectangle {
                 self.select_tab(index);
             }
             let tab = &self.tabs[index];
-            let target = ((tab.agent_port.is_none() || tab.agent_view == AgentView::Files)
-                && tab.session.is_some())
-            .then_some(tab.id);
+            let target = tab.session.is_some().then_some(tab.id);
             if self.address_tab != target {
                 self.address_tab = target;
                 self.browser_address.clear();

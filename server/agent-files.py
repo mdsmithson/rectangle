@@ -216,9 +216,11 @@ def delete(path, filename):
 
 def edit(path, filename):
     with directory_fd(path) as directory:
-        source, _ = regular(directory, name(filename))
+        filename = name(filename)
+        source, _ = regular(directory, filename)
         source.close()
-    os.execvp("vim", ("vim", "--", str(Path(path) / filename)))
+        os.fchdir(directory)
+    os.execvp("vim", ("vim", "--", filename))
 
 
 if __name__ == "__main__":

@@ -111,7 +111,7 @@ def activate(source, commit, expected):
     try:
         for filename in ("rectangle-session", "rectangle-proton", "release-launcher"):
             copy(server / filename, release / filename, 0o700)
-        for filename in ("release.py", "server-update.py", "agent-view", "agent-files.py", "session-seccomp.json", "smb.py", "smb-migrate.py", "Dockerfile.smb"):
+        for filename in ("release.py", "server-update.py", "agent-view", "agent-files.py", "terminal-cwd.py", "session-seccomp.json", "smb.py", "smb-migrate.py", "Dockerfile.smb"):
             copy(server / filename, release / filename, 0o600)
         context = release / "agent-context"
         context.mkdir(mode=0o700)
