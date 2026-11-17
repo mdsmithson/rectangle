@@ -441,14 +441,28 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
             { echo 'Stop the parked session before deleting its saved profile.' >&2; exit 1; }
         metadata_lock
         if [ -f "$saved/$id" ]; then
-            if [ -f "$assets/smb.py" ]; then python3 -I "$assets/smb.py" protect "$id"; fi
+            if [ -f "$assets/smb.py" ]; then python3 -I "$assets/smb.py" check-storage "$id"; fi
             docker volume rm "rectangle-profile-$id" >/dev/null
             rm -f -- "$saved/$id" "$agent_memory/$id"
+            if [ -f "$assets/smb.py" ]; then python3 -I "$assets/smb.py" forget-storage "$id"; fi
         fi
         printf 'OK\n'
         exit ;;
 esac
 case $requested in
+    'agent-prepare-media '*)
+        id=${requested#* }
+        valid_token "$id" || bad_resolution
+        if [ ! -f "$config/smb/shares.json" ]; then printf 'RECTSMBPREP1\n'; exit; fi
+        exec 9>"$config/profile-$id.lock"
+        flock -n 9 || { echo 'Save and close this Agent before preparing its SMB folder.' >&2; exit 1; }
+        [ -z "$(docker ps -q --filter "label=rectangle.profile=$id")" ] ||
+            { echo 'This Agent is still running or parked. Save and close it to prepare SMB.' >&2; exit 1; }
+        [ -f "$saved/$id" ] || { echo 'This saved Agent no longer exists.' >&2; exit 1; }
+        IFS=' ' read -r title page < "$saved/$id"
+        case $page in agent:*) ;; *) exit 1 ;; esac
+        [ -f "$assets/smb.py" ] || bad_resolution
+        exec python3 -I "$assets/smb.py" prepare "$id" "$rectangle_agent_image" ;;
     'agent-smb '*)
         fields=${requested#* }; token=${fields%% *}
         valid_token "$token" || bad_resolution
@@ -924,6 +938,14 @@ if [ -n "$volume" ]; then
     if [ -n "$agent_port" ]; then
         if [ -z "$saved_id" ]; then init_agent_volume "$profile_id"; fi
         set -- "$@" --mount "type=volume,source=$volume,target=/agent/home"
+        if [ -n "$saved_id" ] && [ -f "$config/smb/shares.json" ] && [ -f "$assets/smb.py" ]; then
+            media_mounts=$(python3 -I "$assets/smb.py" mounts "$profile_id")
+            while IFS= read -r media_mount; do
+                [ -z "$media_mount" ] || set -- "$@" --mount "$media_mount"
+            done <<EOF
+$media_mounts
+EOF
+        fi
     else
         set -- "$@" --mount "type=volume,source=$volume,target=/profile/data"
     fi

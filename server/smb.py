@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 CONFIG = Path.home() / ".config/rectangle"
 ROOT = CONFIG / "smb"
@@ -26,11 +27,12 @@ SHARE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}")
 RESERVED = {"global", "homes", "printers", "ipc", "admin", "print"}
 PRIVATE = tuple(map(ipaddress.IPv4Network, ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")))
 LIMIT = 32
+MEDIA = re.compile(r"rectangle-smb-media-[0-9a-f]{32}")
 
 
-def docker(*args, stdin=None, allow_failure=False):
+def docker(*args, stdin=None, allow_failure=False, timeout=90):
     result = subprocess.run(("docker", *args), input=stdin, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, timeout=90)
+                            stderr=subprocess.PIPE, text=True, timeout=timeout)
     if result.returncode and not allow_failure:
         raise ValueError(result.stderr.strip() or "Docker could not configure the SMB service.")
     return result.stdout.strip() if result.returncode == 0 else None
@@ -76,17 +78,6 @@ def validate_share(name):
     if not SHARE.fullmatch(name) or name.lower() in RESERVED:
         raise ValueError("Use 1–48 letters, numbers, underscores, or hyphens for the share name.")
     return name
-
-
-def require_subpath_support():
-    versions = docker("version", "--format", "{{.Client.Version}} {{.Server.APIVersion}}").split()
-    try:
-        major = int(versions[0].split(".", 1)[0])
-        api = tuple(map(int, versions[1].split(".")))
-    except (IndexError, ValueError):
-        raise ValueError("Could not verify Docker support for read-only volume subfolders.") from None
-    if major < 26 or api < (1, 45):
-        raise ValueError("SMB sharing needs Docker Engine and CLI 26 or newer to mount only the shared folder.")
 
 
 def folder(value):
@@ -167,8 +158,9 @@ def configuration_mount(config):
 
 
 def apply(settings, shares, persist):
-    if shares:
-        require_subpath_support()
+    if any("ready" not in item for item in shares):
+        raise ValueError("Turn off the remaining 0.1.13 SMB shares on this host before activating dedicated folders.")
+    shares = [item for item in shares if item.get("ready") and item.get("name")]
     image = ensure_image()
     config = config_file(settings, shares)
     old = docker("inspect", "-f", '{{index .Config.Labels "rectangle.role"}}', SERVICE, allow_failure=True)
@@ -196,11 +188,8 @@ def apply(settings, shares, persist):
             for cap in ("CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "NET_BIND_SERVICE"):
                 args += ["--cap-add", cap]
             for index, item in enumerate(shares):
-                if not ID.fullmatch(item["profile"]):
-                    raise ValueError("Invalid Agent volume.")
-                subpath = folder(item["folder"])
-                args += ["--mount", mount("type=volume", f"source=rectangle-profile-{item['profile']}",
-                                        f"target=/shares/{index}", f"volume-subpath={subpath}", "readonly", "volume-nocopy")]
+                args += ["--mount", mount("type=volume", f"source={media_volume(item)}",
+                                        f"target=/shares/{index}", "readonly", "volume-nocopy")]
             docker(*args, image)
             created = True
             docker("start", SERVICE)
@@ -217,14 +206,13 @@ def apply(settings, shares, persist):
         config.unlink(missing_ok=True)
         raise
     if moved:
-        docker("rm", standby)
+        docker("rm", standby, allow_failure=True)
     if not shares:
         config.unlink(missing_ok=True)
 
 
 def setup(address, cidr):
     settings = validate_network(address, cidr)
-    require_subpath_support()
     password = getpass(f"Set the SMB password for {USERNAME}: ")
     if len(password) < 12 or any(c in "\r\n\0" for c in password):
         raise ValueError("Use an SMB password of at least 12 characters.")
@@ -259,10 +247,25 @@ def inspect_agent(token):
     return container, elements[1]
 
 
+def media_volume(item):
+    volume = item.get("volume", "")
+    if not MEDIA.fullmatch(volume):
+        raise ValueError("Invalid dedicated SMB volume.")
+    return volume
+
+
+def print_listing(settings, shares, profile):
+    print(f"RECTSMB2 {settings['address']}")
+    for item in shares:
+        if item["profile"] == profile and item.get("name"):
+            state = "live" if item.get("ready") else "pending"
+            print(item["folder"].encode().hex(), item["name"], state)
+
+
 def update_listing(token, verb, *fields):
     settings = load("settings.json", None)
     if verb == "list" and not settings:
-        print("RECTSMB1 disabled")
+        print("RECTSMB2 disabled")
         return
     if not settings:
         raise ValueError("Enable SMB once on the Rectangle server.")
@@ -278,27 +281,103 @@ def update_listing(token, verb, *fields):
             if verb == "enable":
                 if not (CONFIG / "saved" / profile).is_file():
                     raise ValueError("Save and close this Agent once, then reopen it before sharing a folder.")
-                if existing:
+                if existing and existing.get("name"):
                     raise ValueError("This folder is already shared.")
                 name = validate_share(bytes.fromhex(fields[1]).decode())
-                if any(item["name"].lower() == name.lower() for item in shares):
+                if any((item.get("name") or "").lower() == name.lower() for item in shares):
                     raise ValueError("That SMB share name is already used on this host.")
-                if len(shares) >= LIMIT:
+                if sum(bool(item.get("name")) for item in shares) >= LIMIT:
                     raise ValueError("This host already has 32 SMB shares.")
                 helper = (ASSETS / "agent-files.py").read_text()
                 docker("exec", container, "python3", "-I", "-c", helper, "validate-share", fields[0])
-                shares.append({"profile": profile, "folder": path, "name": name})
+                if existing:
+                    existing["name"] = name
+                    apply(settings, shares, lambda: store("shares.json", shares))
+                else:
+                    requested = PurePosixPath(path)
+                    for item in shares:
+                        current = PurePosixPath(item["folder"])
+                        if item["profile"] == profile and (requested.is_relative_to(current) or current.is_relative_to(requested)):
+                            raise ValueError("This folder overlaps a folder already managed for SMB.")
+                    if sum(item["profile"] == profile for item in shares) >= LIMIT:
+                        raise ValueError("This Agent already has 32 dedicated SMB folders.")
+                    shares.append({"profile": profile, "folder": path, "name": name, "ready": False})
+                    store("shares.json", shares)
             elif verb == "disable":
-                if not existing:
+                if not existing or not existing.get("name"):
                     raise ValueError("This folder is not shared.")
-                shares.remove(existing)
+                if existing.get("ready"):
+                    existing["name"] = None
+                    apply(settings, shares, lambda: store("shares.json", shares))
+                elif "ready" in existing:
+                    shares.remove(existing)
+                    store("shares.json", shares)
+                else:
+                    raise ValueError("Ask the server owner to remove the 0.1.13 shares with the SMB helper.")
             else:
                 raise ValueError("Unknown SMB operation.")
+    print_listing(settings, shares, profile)
+
+
+def migrate(profile, item, image):
+    path = folder(item["folder"])
+    helper = (ASSETS / "smb-migrate.py").read_text()
+    volume = f"rectangle-smb-media-{uuid.uuid4().hex}"
+    docker("volume", "create", "--label", "rectangle.role=smb-media",
+           "--label", f"rectangle.profile={profile}", volume)
+    try:
+        common = ["run", "--rm", "--network", "none", "--read-only", "--cap-drop=ALL",
+                  "--security-opt", "no-new-privileges", "--memory", "256m", "--pids-limit", "32",
+                  "--mount", mount("type=volume", f"source={volume}", "target=/media", "volume-nocopy")]
+        docker(*common, "--user", "0:0", "--cap-add", "CHOWN", "--entrypoint", "/bin/sh", image,
+               "-ec", "chmod 700 /media; chown 10001:10001 /media")
+        docker(*common, "--user", "10001:10001", "--mount",
+               mount("type=volume", f"source=rectangle-profile-{profile}", "target=/workspace", "readonly", "volume-nocopy"),
+               "--entrypoint", "python3", image, "-I", "-c", helper, path, timeout=3600)
+    except BaseException:
+        docker("volume", "rm", volume, allow_failure=True)
+        raise
+    return volume
+
+
+def prepare(profile, image):
+    if not ID.fullmatch(profile):
+        raise ValueError("Invalid Agent profile.")
+    with lock():
+        shares = load("shares.json", [])
+        pending = [item for item in shares if item["profile"] == profile and not item.get("ready")]
+        if not pending:
+            print("RECTSMBPREP1")
+            return
+        settings = load("settings.json", None)
+        if not settings:
+            raise ValueError("SMB setup is missing. The original Agent files are unchanged.")
+        volumes = []
+        try:
+            for item in pending:
+                volume = migrate(profile, item, image)
+                volumes.append(volume)
+                item.update(volume=volume, ready=True)
             apply(settings, shares, lambda: store("shares.json", shares))
-    print(f"RECTSMB1 {settings['address']}")
-    for item in shares:
-        if item["profile"] == profile:
-            print(item["folder"].encode().hex(), item["name"])
+        except BaseException:
+            for volume in volumes:
+                docker("volume", "rm", volume, allow_failure=True)
+            raise
+    print("RECTSMBPREP1")
+
+
+def agent_mounts(profile):
+    if not ID.fullmatch(profile):
+        raise ValueError("Invalid Agent profile.")
+    for item in load("shares.json", []):
+        if item["profile"] != profile or not item.get("ready"):
+            continue
+        folder(item["folder"])
+        volume = media_volume(item)
+        label = docker("volume", "inspect", "-f", '{{index .Labels "rectangle.profile"}}', volume)
+        if label != profile:
+            raise ValueError("The Agent's dedicated media volume is missing or does not match.")
+        print(mount("type=volume", f"source={volume}", f"target={item['folder']}", "volume-nocopy"))
 
 
 def protect(profile, *encoded):
@@ -306,8 +385,32 @@ def protect(profile, *encoded):
     if len(encoded) == 2:
         path = path / bytes.fromhex(encoded[1]).decode()
     for item in load("shares.json", []):
-        if item["profile"] == profile and (path is None or PurePosixPath(item["folder"]).is_relative_to(path)):
-            raise ValueError("Turn off the SMB share before deleting or moving the shared folder or saved Agent.")
+        if item["profile"] != profile:
+            continue
+        if path is None and item.get("name"):
+            raise ValueError("Turn off the SMB share before deleting the saved Agent.")
+        if path is not None and PurePosixPath(item["folder"]).is_relative_to(path):
+            raise ValueError("This folder is managed by Rectangle as a dedicated SMB volume and cannot be moved or deleted here.")
+
+
+def forget_storage(profile, check_only=False):
+    with lock():
+        protect(profile)
+        shares = load("shares.json", [])
+        owned = [item for item in shares if item["profile"] == profile and item.get("ready")]
+        for item in owned:
+            volume = media_volume(item)
+            if volume not in docker("volume", "ls", "-q", "--filter", f"name={volume}").splitlines():
+                continue
+            label = docker("volume", "inspect", "-f", '{{index .Labels "rectangle.profile"}}', volume)
+            if label != profile:
+                raise ValueError("The Agent's dedicated media volume does not match.")
+            if docker("ps", "-aq", "--filter", f"volume={volume}"):
+                raise ValueError("A Docker container is still using this Agent's dedicated media volume.")
+            if not check_only:
+                docker("volume", "rm", volume)
+        if owned and not check_only:
+            store("shares.json", [item for item in shares if item["profile"] != profile])
 
 
 def admin_remove(name):
@@ -315,16 +418,26 @@ def admin_remove(name):
     with lock():
         settings = load("settings.json", None)
         shares = load("shares.json", [])
-        keep = [item for item in shares if item["name"].lower() != name.lower()]
-        if not settings or len(keep) == len(shares):
+        existing = next((item for item in shares if (item.get("name") or "").lower() == name.lower()), None)
+        if not settings or not existing:
             raise ValueError("There is no SMB share with that name.")
-        apply(settings, keep, lambda: store("shares.json", keep))
+        if existing.get("ready"):
+            existing["name"] = None
+            apply(settings, shares, lambda: store("shares.json", shares))
+        elif "ready" in existing or any(item is not existing and "ready" not in item for item in shares):
+            shares.remove(existing)
+            store("shares.json", shares)
+        else:
+            shares.remove(existing)
+            apply(settings, shares, lambda: store("shares.json", shares))
 
 
 if __name__ == "__main__":
     os.umask(0o077)
     try:
         operation, *args = sys.argv[1:]
-        {"setup": setup, "agent": update_listing, "protect": protect, "remove": admin_remove}[operation](*args)
+        {"setup": setup, "agent": update_listing, "prepare": prepare, "mounts": agent_mounts,
+         "protect": protect, "forget-storage": forget_storage,
+         "check-storage": lambda profile: forget_storage(profile, True), "remove": admin_remove}[operation](*args)
     except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.SubprocessError) as error:
         sys.exit(str(error))

@@ -195,6 +195,7 @@ enum Job {
     List(Backend),
     ParkedList(Backend),
     OpenSaved(Backend, saved::Entry, Option<Snap>),
+    PrepareAgentMedia(Backend, saved::Entry, Option<Snap>),
     Park(u64, Backend),
     StopParked(Backend),
     Close(u64, Backend),
@@ -1474,6 +1475,14 @@ impl Rectangle {
                         let count = self.tabs.len();
                         self.resume_parked(ctx, backend, parked);
                         self.place_new_tab(count, slot);
+                    } else if entry.agent_port.is_some() {
+                        let command = format!("agent-prepare-media {}", entry.id);
+                        self.request(
+                            ctx,
+                            Job::PrepareAgentMedia(backend, entry, slot),
+                            backend,
+                            &command,
+                        );
                     } else {
                         let count = self.tabs.len();
                         self.open_tab(ctx, backend, Some(entry), None);
@@ -1482,6 +1491,29 @@ impl Rectangle {
                 }
                 Ok(())
             }),
+            Job::PrepareAgentMedia(backend, entry, slot) => {
+                if !self.quitting {
+                    let problem = match result {
+                        Ok(reply) if reply.trim() == "RECTSMBPREP1" => None,
+                        Ok(_) => Some("The server did not confirm SMB preparation.".into()),
+                        Err(error)
+                            if error
+                                .to_string()
+                                .contains("Invalid Rectangle display resolution.") =>
+                        {
+                            None
+                        }
+                        Err(error) => Some(error.to_string()),
+                    };
+                    let count = self.tabs.len();
+                    self.open_tab(ctx, backend, Some(entry), None);
+                    self.place_new_tab(count, slot);
+                    if let Some(error) = problem {
+                        self.error = Some(format!("SMB is still pending: {error}"));
+                    }
+                }
+                Ok(())
+            }
             Job::List(backend) => {
                 let result =
                     result
@@ -2880,6 +2912,11 @@ impl Rectangle {
                 ui.label("Checking for parked tabs…");
             });
             return;
+        } else if matches!(&self.job, Some((Job::PrepareAgentMedia(..), _))) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Preparing shared folders… Large folders may take a while.");
+            });
         } else if self.job.is_some() && (self.home || block_input) {
             ui.horizontal(|ui| {
                 ui.spinner();

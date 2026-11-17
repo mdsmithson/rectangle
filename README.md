@@ -129,7 +129,7 @@ The default tests do not connect to a server. Ignored integration tests require 
 
 ## Read-only Windows shares
 
-Rectangle 0.1.13 can share a folder from a saved Agent through one Samba service per host. The host needs Docker Engine and CLI 26 or newer for `volume-subpath`, and an unused TCP port 445 on its LAN address. Enable the feature once from a regular SSH terminal as the Rectangle server owner:
+Rectangle can share a folder from a saved Agent through one Samba service per host. It uses whole Docker volumes and works on Docker 25. The host needs an unused TCP port 445 on its LAN address. Enable the feature once from a regular SSH terminal as the Rectangle server owner:
 
 ```sh
 python3 -I ~/.config/rectangle/current-release/smb.py setup <LAN-IP> <LAN-CIDR>
@@ -138,10 +138,13 @@ python3 -I ~/.config/rectangle/current-release/smb.py setup <LAN-IP> <LAN-CIDR>
 Enter a separate SMB password at the hidden prompts. The command needs the private IPv4 address and local subnet, for example `192.168.1.20 192.168.1.0/24`. Do not forward TCP 445 from the internet. SMB uses the username `rectangle`.
 
 1. Save and close the Agent once, then reopen it from Home.
-2. In File Manager, right-click a folder such as Music and check **Share over SMB**. Pick a unique name for the server. The files stay available even when the Agent is closed.
-3. Right-click again and choose **Copy Windows path**. Map it to a drive in Windows using the SMB username and password, then add that drive in Winamp.
+2. In File Manager, right-click a folder such as Music and check **Share over SMB**. Pick a share name that's unique on this host.
+3. The first time you share a folder, save and close the Agent, then reopen it from Home. Parking won't start the copy. Rectangle needs free space for a second copy and keeps the original files for recovery. Afterward, the Agent uses the new volume at the same folder path and SMB stays available when the Agent is closed.
+4. When the share is live, right-click the folder and choose **Copy Windows path**. Map it to a drive in Windows using the SMB username and password, then add that drive in Winamp.
 
-Sharing is read-only at both the SMB and Docker mount levels, requires authentication, and serves only the selected volume subfolder. Changing shares can briefly disconnect other SMB clients. Turn off a share before moving or deleting its folder or deleting the saved Agent. The server owner can remove a share without reopening the Agent: `python3 -I ~/.config/rectangle/current-release/smb.py remove <share-name>`.
+Samba mounts only the dedicated folder volume, read-only, and requires authentication. Agent edits inside the folder appear immediately over SMB. Turning off sharing leaves files available at the same path, and sharing that folder again does not require another restart. You can edit the files inside the folder, but Rectangle protects the folder itself and its parent paths from moves and deletion in File Manager. Turn off sharing before deleting the saved Agent. Changing shares can briefly disconnect other SMB clients. The server owner can turn off a share without reopening the Agent: `python3 -I ~/.config/rectangle/current-release/smb.py remove <share-name>`.
+
+If you enabled shares under 0.1.13, turn them all off before updating the server, then share those folders again after updating.
 
 The Windows icon and loading animation are generated from the square spiral in `src/mark.rs`. Firefox and the other software used in containers are downloaded during image builds.
 

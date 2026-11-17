@@ -11,8 +11,13 @@ enum Service {
     Unconfigured,
     Ready {
         address: Ipv4Addr,
-        folders: HashMap<String, String>,
+        folders: HashMap<String, Share>,
     },
+}
+
+struct Share {
+    name: String,
+    pending: bool,
 }
 
 enum Change {
@@ -42,8 +47,13 @@ impl Shares {
             let changed = self.job.take().unwrap().0;
             match response.and_then(|output| parse(&output)) {
                 Ok(state) => {
+                    let pending = matches!(&state, Service::Ready { folders, .. } if folders.values().any(|share| share.pending));
                     self.state = Some(state);
-                    self.message = changed.then(|| (true, "SMB sharing updated.".into()));
+                    self.message = changed.then(|| (true, if pending {
+                        "Share queued. Save and close the Agent, then reopen it from Home to start sharing."
+                    } else {
+                        "SMB sharing updated."
+                    }.into()));
                 }
                 Err(error) => {
                     let detail = error.to_string();
@@ -107,8 +117,8 @@ impl Shares {
                 });
                 ui.close();
             }
-            if let Some(existing) = existing {
-                let path = format!(r"\\{address}\{existing}");
+            if let Some(existing) = existing.filter(|share| !share.pending) {
+                let path = format!(r"\\{address}\{}", existing.name);
                 if ui
                     .button("Copy Windows path")
                     .on_hover_text(&path)
@@ -117,6 +127,8 @@ impl Shares {
                     ui.ctx().copy_text(path);
                     ui.close();
                 }
+            } else if existing.is_some() {
+                ui.label("Pending: save, close, and reopen the Agent.");
             }
         } else {
             let reason = if matches!(self.state, Some(Service::Unconfigured)) {
@@ -176,6 +188,7 @@ impl Shares {
                         ui.label("Windows share name");
                         ui.text_edit_singleline(name);
                         ui.label("Read only on your home network. A password is required.");
+                        ui.label("First time only: save, close, and reopen the Agent. Rectangle needs space to copy the folder and keeps the original as a backup.");
                         if ui
                             .add_enabled(valid(name), egui::Button::new("Share folder"))
                             .clicked()
@@ -245,10 +258,13 @@ fn suggestion(agent: &str, name: &str) -> String {
 fn parse(output: &str) -> io::Result<Service> {
     let invalid = || io::Error::other("Unexpected SMB reply from the server.");
     let mut lines = output.lines();
-    let header = lines
+    let (version, header) = lines
         .next()
-        .and_then(|line| line.strip_prefix("RECTSMB1 "))
+        .and_then(|line| line.split_once(' '))
         .ok_or_else(invalid)?;
+    if !matches!(version, "RECTSMB1" | "RECTSMB2") {
+        return Err(invalid());
+    }
     if header == "disabled" {
         return Ok(Service::Unconfigured);
     }
@@ -256,11 +272,26 @@ fn parse(output: &str) -> io::Result<Service> {
     let mut folders = HashMap::new();
     for line in lines {
         let (folder, share) = line.split_once(' ').ok_or_else(invalid)?;
+        let (share, pending) = if version == "RECTSMB2" {
+            match share.split_once(' ') {
+                Some((name, "pending")) => (name, true),
+                Some((name, "live")) => (name, false),
+                _ => return Err(invalid()),
+            }
+        } else {
+            (share, false)
+        };
         let folder = saved::decode(folder, 2048).ok_or_else(invalid)?;
         if !valid(share) || !folder.starts_with("/agent/home/") || folders.len() >= 32 {
             return Err(invalid());
         }
-        folders.insert(folder, share.into());
+        folders.insert(
+            folder,
+            Share {
+                name: share.into(),
+                pending,
+            },
+        );
     }
     Ok(Service::Ready { address, folders })
 }
@@ -271,4 +302,18 @@ fn share_names_fit_windows_paths() {
     assert!(valid(&suggestion("___", "音楽")));
     assert!(!valid("Global"));
     assert!(!valid("Music/../../tmp"));
+}
+
+#[test]
+fn pending_share_is_distinct_from_a_live_windows_share() {
+    let folder = "/agent/home/workspace/Music";
+    let output = format!(
+        "RECTSMB2 192.168.1.2\n{} Music pending\n",
+        saved::encode(folder)
+    );
+    let Service::Ready { folders, .. } = parse(&output).unwrap() else {
+        panic!("missing share")
+    };
+    assert!(folders[folder].pending);
+    assert_eq!(folders[folder].name, "Music");
 }
