@@ -112,7 +112,11 @@ Remove the flag to allow new tabs to start a tunnel if a profile is installed. C
 
 **Settings → Updates** shows the installed version. Choose **Check for updates**, then **Update** if the official repository has a higher version. Rectangle checks out the exact revision advertised during the check and builds it with Cargo. When the build succeeds, it parks your tabs, replaces the client executable, and restarts. Updates require Git, Rust/Cargo, the same Windows build tools as the initial build, and a writable client executable directory. A failed build keeps the installed version and shows the path to the build log.
 
-The updater only changes the desktop client. Update the server separately when the release requires it. Maintainers must bump the three-part version in `Cargo.toml` and update `Cargo.lock` when publishing a client update to `main`.
+Starting with 0.1.10, **Settings → Updates** builds the desktop client first and updates configured servers that are behind. Servers fetch the matching revision through the official GitHub repository, serialize concurrent requests, and return immediately when their installed version is already at or above the requested one. Changed images build before the host activates the new files. Running containers and VPN settings stay in place; new containers use the new images. If a server fails, Rectangle keeps the current desktop version and can retry without rebuilding the prepared desktop binary.
+
+Enable server updates once, as the server's Rectangle SSH account, from the 0.1.10 source checkout: `sh server/install.sh --keep-egress --enable-server-updates`. This preserves the existing egress mode. Install Git on the host first. On a fresh server, use `--direct-https` or `--vpn-only` instead of `--keep-egress`. To opt out later, remove `~/.config/rectangle/allow-server-updates`. A desktop on 0.1.9 or earlier can install 0.1.10 using its old desktop-only updater. After that, **Check for updates → Sync servers** can bring hosts up to the desktop version even when there is no newer client. Program Files installations may prompt for Windows administrator approval to replace the executable.
+
+Maintainers must bump the three-part version in `Cargo.toml` and update `Cargo.lock` for each update. When adding a local Docker build input, also add it to the corresponding image in `server/release.py`.
 
 ```powershell
 cargo fmt --check
@@ -120,7 +124,7 @@ cargo test --locked
 python -m unittest discover -s server
 ```
 
-The default tests do not connect to a server. Ignored integration tests require your own test host and key; see the `RECTANGLE_SMOKE_*` variables in the test source. To update the server, rerun `server/install.sh` with the same mode, then start new containers. Existing running containers retain their old image.
+The default tests do not connect to a server. Ignored integration tests require your own test host and key; see the `RECTANGLE_SMOKE_*` variables in the test source. Existing running containers retain their old image. The server owner can still run `sh server/install.sh --keep-egress` for manual upgrades.
 
 The Windows icon and loading animation are generated from the square spiral in `src/mark.rs`. Firefox and the other software used in containers are downloaded during image builds.
 

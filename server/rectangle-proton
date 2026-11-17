@@ -3,6 +3,10 @@
 set -eu
 umask 077
 dir="$HOME/.config/rectangle/proton"
+rectangle_proton_image=rectangle-proton:demo
+if [ -n "${RECTANGLE_RELEASE_DIR:-}" ]; then
+    . "$RECTANGLE_RELEASE_DIR/images.sh"
+fi
 name=rectangle-proton
 is_gateway() {
     [ "$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "$name" 2>/dev/null)" = proton ]
@@ -21,7 +25,7 @@ with socket.create_connection((host, 443), timeout=3) as conn:
 describe() {
     timeout 8 docker run --rm -i --pull=never --network none --read-only --cap-drop ALL \
         --security-opt no-new-privileges --memory 64m --pids-limit 16 --user 10001:10001 \
-        rectangle-proton:demo describe
+        "$rectangle_proton_image" describe
 }
 lock() {
     mkdir -p "$dir"
@@ -119,7 +123,7 @@ else
         --mount "type=bind,source=$dir/client.conf,target=/run/proton/client.conf,readonly" \
         --mount "type=bind,source=$dir/resolv.conf,target=/etc/resolv.conf,readonly" \
         --mount "type=bind,source=$dir/socket,target=/run/rectangle" \
-        rectangle-proton:demo >/dev/null
+        "$rectangle_proton_image" >/dev/null
 fi
 i=0
 while [ ! -S "$dir/socket/egress.sock" ]; do

@@ -14,18 +14,52 @@ if ($env:RECTANGLE_UPDATE_MODE -eq 'install') {
     $backup = "$target.$suffix.bak"
     $processId = [int]$env:RECTANGLE_UPDATE_PID
     $canRestart = $false
+    $elevated = $false
     $params = @{ FilePath = $target; WorkingDirectory = $env:RECTANGLE_UPDATE_CWD }
     if ($env:RECTANGLE_UPDATE_ARGS) { $params.ArgumentList = $env:RECTANGLE_UPDATE_ARGS }
+    function Replace-Client([string]$source, [string]$destination, [string]$previous, [string]$scratch, [string]$hash) {
+        try {
+            Copy-Item -LiteralPath $source -Destination $scratch
+            if ((Get-FileHash -LiteralPath $scratch -Algorithm SHA256).Hash -ne $hash) {
+                throw 'The staged Rectangle binary changed before installation.'
+            }
+            [IO.File]::Replace($scratch, $destination, $previous)
+        } finally {
+            Remove-Item -LiteralPath $scratch -ErrorAction SilentlyContinue
+        }
+    }
+    function Elevated-Replace([string]$source, [string]$destination, [string]$previous, [string]$scratch) {
+        $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        $arguments = @($source, $destination, $previous, $scratch, $hash) | ForEach-Object {
+            "'" + $_.Replace("'", "''") + "'"
+        }
+        $command = '$ErrorActionPreference = "Stop"; function Replace-Client {' +
+            (Get-Command Replace-Client).Definition + '}; Replace-Client ' + ($arguments -join ' ')
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $elevation = @{FilePath = (Join-Path $PSHOME 'powershell.exe'); Verb = 'RunAs';
+            WindowStyle = 'Hidden'; PassThru = $true; Wait = $true;
+            ArgumentList = @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded)}
+        $child = Start-Process @elevation
+        if ($child.ExitCode -ne 0) { throw 'The administrator installation did not finish.' }
+    }
     try {
         $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
         if ($process -and !$process.WaitForExit(60000)) { throw 'Rectangle did not exit in time.' }
         $canRestart = $true
-        Copy-Item -LiteralPath $candidate -Destination $staged
-        [IO.File]::Replace($staged, $target, $backup)
+        try {
+            Replace-Client $candidate $target $backup $staged (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
+        } catch [UnauthorizedAccessException] {
+            Elevated-Replace $candidate $target $backup $staged
+            $elevated = $true
+        }
         try {
             Start-Process @params
         } catch {
-            [IO.File]::Replace($backup, $target, $null)
+            if ($elevated) {
+                Elevated-Replace $backup $target "$backup.failed" "$staged.rollback"
+            } else {
+                [IO.File]::Replace($backup, $target, $null)
+            }
             throw
         }
         Remove-Item -LiteralPath $backup -ErrorAction SilentlyContinue

@@ -1811,6 +1811,11 @@ impl Rectangle {
     fn dialogs(&mut self, ctx: &egui::Context) {
         if let Some(mut draft) = self.settings_edit.take() {
             use SettingsSection::{Connections, Proton, Startup, Updates};
+            let update_hosts: Vec<_> = [Backend::Primary, Backend::Secondary]
+                .into_iter()
+                .map(|backend| self.connection(backend))
+                .filter(|connection| !connection.host.trim().is_empty())
+                .collect();
             let mut save = false;
             let mut cancel = false;
             let mut update = None;
@@ -1884,7 +1889,7 @@ impl Rectangle {
                                 }
                             }
                             Proton => self.proton.settings(ui, Backend::Primary.name(&self.host), self.host.trim(), self.identity.as_deref()),
-                            Updates => { update = self.updater.show(ui); }
+                            Updates => { update = self.updater.show(ui, &update_hosts); }
                         });
                     if let Some(error) = &draft.error {
                         ui.label(RichText::new(error).color(Color32::LIGHT_RED));

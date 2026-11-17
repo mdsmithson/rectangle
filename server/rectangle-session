@@ -35,6 +35,16 @@ print(page)
 ' "$1"
 }
 config="$HOME/.config/rectangle"
+assets=${RECTANGLE_RELEASE_DIR:-$config}
+proton_helper="$HOME/.local/bin/rectangle-proton"
+rectangle_browser_image=rectangle-browser:demo
+rectangle_agent_image=rectangle-agent:demo
+rectangle_vpn_image=rectangle-vpn:demo
+rectangle_egress_image=rectangle-egress:demo
+if [ -n "${RECTANGLE_RELEASE_DIR:-}" ]; then
+    . "$assets/images.sh"
+    proton_helper="$assets/rectangle-proton"
+fi
 saved="$config/saved"
 agent_memory="$config/agent-memory"
 mkdir -p "$saved"
@@ -56,7 +66,7 @@ init_agent_volume() {
     docker run --rm --pull=never --network none --read-only --cap-drop ALL \
         --security-opt no-new-privileges --memory 64m --pids-limit 16 \
         --mount "type=volume,source=rectangle-profile-$1,target=/agent/home" \
-        --entrypoint /bin/true rectangle-agent:demo
+        --entrypoint /bin/true "$rectangle_agent_image"
 }
 read_parked() {
     [ -f "$sessions/$1/parked" ] && IFS=' ' read -r expiry title keep layout < "$sessions/$1/parked"
@@ -96,6 +106,11 @@ check_live() {
     test "$(docker inspect -f '{{if .State.Running}}{{index .Config.Labels "rectangle.profile"}}{{end}}' "rectangle-tab-$1" 2>/dev/null || :)" = "$2"
 }
 case $requested in
+    'server-update '*)
+        fields=${requested#* }; revision=${fields%% *}; target=${fields#* }
+        [ "$fields" != "$revision" ] && [ -f "$assets/server-update.py" ] ||
+            { echo 'Install the one-time Rectangle server update support on this host.' >&2; exit 1; }
+        exec python3 -I "$assets/server-update.py" "$revision" "$target" ;;
     'agent-build '*)
         [ -f "$config/allow-agent-builds" ] || {
             echo 'Custom Agent builds are disabled. The server owner can enable them with ~/.config/rectangle/allow-agent-builds.' >&2
@@ -103,7 +118,7 @@ case $requested in
         }
         image_id=${requested#* }
         valid_token "$image_id" || bad_resolution
-        context="$config/agent-context"
+        context="$assets/agent-context"
         [ -f "$context/agent-entrypoint" ] || { echo 'Agent build files are missing on this host.' >&2; exit 1; }
         temp=$(mktemp -d "${TMPDIR:-/tmp}/rectangle-build.XXXXXXXX")
         trap 'rm -f -- "$temp/Dockerfile"; rmdir "$temp"' EXIT
@@ -251,14 +266,14 @@ case $requested in
         [ -t 0 ] && [ -t 1 ] || { echo 'ncdu requires an SSH terminal.' >&2; exit 1; }
         command -v ncdu >/dev/null || { echo 'Install ncdu on the Rectangle server.' >&2; exit 1; }
         exec /bin/setpriv --no-new-privs ncdu -rr / ;;
-    proton-status) exec "$HOME/.local/bin/rectangle-proton" status ;;
-    proton-view) exec "$HOME/.local/bin/rectangle-proton" view ;;
+    proton-status) exec "$proton_helper" status ;;
+    proton-view) exec "$proton_helper" view ;;
     proton-replace)
         [ -f "$config/allow-vpn-changes" ] || {
             echo 'Remote VPN changes are disabled by the server owner.' >&2
             exit 1
         }
-        exec "$HOME/.local/bin/rectangle-proton" replace ;;
+        exec "$proton_helper" replace ;;
     list|list-v2)
         metadata_lock
         if [ "$requested" = list ]; then printf 'RECTSAVED1\n'; else printf 'RECTSAVED2\n'; fi
@@ -309,6 +324,7 @@ case $requested in
             if [ "$role" = agent ]; then
                 agent_image=$(docker inspect -f '{{.Config.Image}}' "$container")
                 port=$(docker inspect -f '{{index .Config.Labels "rectangle.agent-port"}}' "$container")
+                case $agent_image in rectangle-agent:build-*) agent_image=rectangle-agent:demo ;; esac
                 page="agent:${agent_image#rectangle-agent:}:$port"
                 if [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-view"}}' "$container")" = files ]; then
                     page="$page:files"
@@ -321,8 +337,8 @@ case $requested in
                         docker run --rm -i --pull=never --network none --read-only --cap-drop ALL \
                             --security-opt no-new-privileges --memory 128m --pids-limit 16 \
                             --mount "type=volume,source=rectangle-profile-$2,target=/agent/home" \
-                            --entrypoint /bin/tar rectangle-agent:demo -C /agent/home -xf -
-                    ' migrate "$container" "$id" || { echo 'Could not save the Agent workspace.' >&2; exit 1; }
+                            --entrypoint /bin/tar "$3" -C /agent/home -xf -
+                    ' migrate "$container" "$id" "$rectangle_agent_image" || { echo 'Could not save the Agent workspace.' >&2; exit 1; }
                 fi
                 bytes=$(docker inspect -f '{{.HostConfig.Memory}}' "$container")
                 case $bytes in ''|*[!0-9]*) agent_memory_error 'Could not read the Agent memory limit.' ;; esac
@@ -398,29 +414,29 @@ EOF
                 case $action in
                     sh|freebuff|files)
                         [ -z "$path" ] || exit 1
-                        exec docker exec -i "$name" sh -c "$(cat "$config/agent-view")" agent-view "$action" ;;
+                        exec docker exec -i "$name" sh -c "$(cat "$assets/agent-view")" agent-view "$action" ;;
                     edit)
                         [ -n "$path" ] && [ -n "$file" ] && [ -z "$size$extra" ] || exit 1
-                        exec docker exec -i "$name" sh -c "$(cat "$config/agent-view")" agent-view edit +                            "$(cat "$config/agent-files.py")" "$path" "$file" ;;
+                        exec docker exec -i "$name" sh -c "$(cat "$assets/agent-view")" agent-view edit "$(cat "$assets/agent-files.py")" "$path" "$file" ;;
                     *) exit 1 ;;
                 esac ;;
             agent-files)
                 case $path in ''|*[!0-9]*) exit 1 ;; esac
                 case $file in ''|asc|desc) ;; *) exit 1 ;; esac
                 [ -z "$size$extra" ] || exit 1
-                exec docker exec "$name" python3 -I -c "$(cat "$config/agent-files.py")" list "$action" "$path" "${file:-asc}" ;;
+                exec docker exec "$name" python3 -I -c "$(cat "$assets/agent-files.py")" list "$action" "$path" "${file:-asc}" ;;
             agent-upload)
                 case $file in ''|*[!0-9]*) exit 1 ;; esac
                 [ -z "$size$extra" ] || exit 1
-                exec docker exec -i "$name" python3 -I -c "$(cat "$config/agent-files.py")" upload "$action" "$path" "$file" ;;
+                exec docker exec -i "$name" python3 -I -c "$(cat "$assets/agent-files.py")" upload "$action" "$path" "$file" ;;
             agent-file)
                 case $action in
                     download|delete)
                         [ -n "$file" ] && [ -z "$size$extra" ] || exit 1
-                        exec docker exec "$name" python3 -I -c "$(cat "$config/agent-files.py")" "$action" "$path" "$file" ;;
+                        exec docker exec "$name" python3 -I -c "$(cat "$assets/agent-files.py")" "$action" "$path" "$file" ;;
                     rename)
                         [ -n "$file" ] && [ -n "$size" ] && [ -n "$extra" ] || exit 1
-                        exec docker exec "$name" python3 -I -c "$(cat "$config/agent-files.py")" rename "$path" "$file" "$size" "$extra" ;;
+                        exec docker exec "$name" python3 -I -c "$(cat "$assets/agent-files.py")" rename "$path" "$file" "$size" "$extra" ;;
                     *) exit 1 ;;
                 esac ;;
         esac ;;
@@ -608,7 +624,7 @@ search_terms=
 agent_port=
 agent_view=freebuff
 memory_mib=3072
-image=rectangle-browser:demo
+image=$rectangle_browser_image
 parse_agent() {
     agent=${1#agent:}; image_id=${agent%%:*}; agent_port=${agent#*:}
     [ "$agent" != "$image_id" ] || bad_resolution
@@ -617,7 +633,7 @@ parse_agent() {
     [ "${#agent_port}" -le 5 ] && [ "$agent_port" -ge 1024 ] && [ "$agent_port" -le 65535 ] ||
         { echo 'Choose an Agent port from 1024 to 65535.' >&2; exit 1; }
     if [ "$image_id" != demo ]; then valid_token "$image_id" || bad_resolution; fi
-    image="rectangle-agent:$image_id"
+    if [ "$image_id" = demo ]; then image=$rectangle_agent_image; else image="rectangle-agent:$image_id"; fi
 }
 case $requested in
     *' '*)
@@ -678,7 +694,7 @@ for value in "$width" "$height"; do
     [ "${#value}" -le 4 ] && [ "$value" -le 4096 ] || bad_resolution
 done
 [ "$width" -ge 320 ] && [ "$height" -ge 200 ] && [ "$((width * height))" -le 8847360 ] || bad_resolution
-profile="$config/session-seccomp.json"
+profile="$assets/session-seccomp.json"
 [ -s "$profile" ] || { echo 'Rectangle has no session seccomp profile; see setup instructions.' >&2; exit 1; }
 runtime=$(mktemp -d "${TMPDIR:-/tmp}/rectangle.XXXXXXXX")
 name="rectangle-demo-${runtime##*.}"
@@ -787,7 +803,7 @@ elif [ -f "$vpn_profile" ]; then
         --log-driver local --log-opt max-size=1m --log-opt max-file=1 --log-opt compress=false \
         --mount "type=bind,source=$vpn_profile,target=/run/vpn/client.ovpn,readonly" \
         --mount "type=bind,source=$runtime/socket,target=/run/rectangle" \
-        rectangle-vpn:demo >/dev/null
+        "$rectangle_vpn_image" >/dev/null
     i=0
     while [ ! -S "$runtime/socket/egress.sock" ]; do
         i=$((i + 1)); [ "$i" -lt 60 ] || { echo 'The Rectangle VPN container did not start. Check its profile, TUN, and firewall support.' >&2; exit 1; }
@@ -803,7 +819,7 @@ elif [ -f "$config/cloud-egress" ]; then
         --network bridge --read-only --cap-drop ALL --security-opt no-new-privileges \
         --memory 128m --cpus 0.5 --pids-limit 64 --log-driver none \
         --mount "type=bind,source=$runtime/socket,target=/run/rectangle" \
-        rectangle-egress:demo >/dev/null
+        "$rectangle_egress_image" >/dev/null
     i=0
     while [ ! -S "$runtime/socket/egress.sock" ]; do
         i=$((i + 1)); [ "$i" -lt 60 ] || { echo 'The cloud HTTPS proxy did not start.' >&2; exit 1; }

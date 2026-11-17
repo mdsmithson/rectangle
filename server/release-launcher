@@ -1,0 +1,7 @@
+#!/bin/sh
+# Resolve the release once, so an in-flight session never mixes release assets.
+set -eu
+case ${0##*/} in rectangle-session|rectangle-proton) program=${0##*/} ;; *) exit 1 ;; esac
+RECTANGLE_RELEASE_DIR=$(readlink -f "$HOME/.config/rectangle/current-release")
+export RECTANGLE_RELEASE_DIR
+exec "$RECTANGLE_RELEASE_DIR/$program" "$@"
