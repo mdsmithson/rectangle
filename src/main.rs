@@ -2426,6 +2426,14 @@ impl Rectangle {
             .address_tab
             .and_then(|id| self.tabs.iter().find(|tab| tab.id == id));
         let files = tab.is_some_and(|tab| tab.agent_view == AgentView::Files);
+        let file_command = tab.filter(|_| files).and_then(|tab| {
+            let session = tab.session.as_ref()?;
+            Some(terminal::shell_command(
+                tab.connection.host.trim(),
+                &session.token,
+                tab.explorer.path(),
+            ))
+        });
         let view = tab.and_then(Tab::terminal_view);
         let watch = tab
             .zip(view.as_deref())
@@ -2447,31 +2455,25 @@ impl Rectangle {
         let enabled = enabled
             && self.job.is_none()
             && (self.address_tab.is_some() || self.tabs.len() < MAX_TABS);
-        if let Some((tab, mode, session)) = watch {
+        if let Some((tab, _, session)) = watch {
             self.browser_address = self
                 .terminal_directory
                 .as_ref()
                 .and_then(|(_, directory)| directory.as_ref())
-                .and_then(|directory| {
-                    directory.address(tab.connection.host.trim(), &session.token, mode)
+                .and_then(terminal::WorkingDirectory::path)
+                .map(|path| {
+                    terminal::shell_command(tab.connection.host.trim(), &session.token, &path)
                 })
                 .unwrap_or_default();
         } else if !focused && self.address_tab.is_some() {
-            self.browser_address = tab
-                .and_then(|tab| {
-                    if files {
-                        tab.session.as_ref().map(|session| {
-                            tab.explorer
-                                .address(tab.connection.host.trim(), &session.token)
-                        })
-                    } else {
-                        tab.navigation
-                            .as_ref()
-                            .and_then(navigation::Navigation::state)
-                            .map(|page| page.url)
-                    }
-                })
-                .unwrap_or_default();
+            self.browser_address = if files {
+                file_command.clone()
+            } else {
+                tab.and_then(|tab| tab.navigation.as_ref())
+                    .and_then(navigation::Navigation::state)
+                    .map(|page| page.url)
+            }
+            .unwrap_or_default();
         }
         let linked = self.address_tab.is_some();
         let fill = if linked {
@@ -2502,7 +2504,10 @@ impl Rectangle {
         } else {
             None
         };
-        let has_address = !address.trim().is_empty();
+        let has_address = !address.trim().is_empty()
+            && !file_command
+                .as_deref()
+                .is_some_and(|command| command == address.trim());
         let editor = |ui: &mut egui::Ui, text: &mut dyn egui::TextBuffer| {
             ui.add_enabled(
                 enabled,
@@ -2512,7 +2517,7 @@ impl Rectangle {
                     .desired_width(width)
                     .margin(egui::Margin::symmetric(12, 7))
                     .hint_text(if view.is_some() {
-                        "Terminal working directory"
+                        "SSH command for this terminal"
                     } else if width < 190.0 {
                         "Search or URL"
                     } else {
@@ -2527,9 +2532,9 @@ impl Rectangle {
             editor(ui, address)
         }
         .on_hover_text(if view.is_some() {
-            "Current working directory of this terminal. Select and copy the address."
+            "Copy this command into your local terminal to open a shell in this folder."
         } else if files {
-            "Enter an Agent folder address or an absolute folder path."
+            "Copy this command to open a shell here. To change folders, replace it with an absolute folder path and press Enter."
         } else if self.address_tab.is_some() {
             "Enter navigates this tab. Ctrl+Enter completes a site name."
         } else {

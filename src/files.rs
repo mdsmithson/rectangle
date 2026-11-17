@@ -164,8 +164,8 @@ impl Explorer {
             self.reset();
         }
     }
-    pub fn address(&self, host: &str, token: &str) -> String {
-        address(host, token, &self.path)
+    pub fn path(&self) -> &str {
+        &self.path
     }
     pub fn navigate(&mut self, host: &str, token: &str, value: &str) -> io::Result<()> {
         if self.job.is_some() {

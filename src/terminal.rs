@@ -48,9 +48,8 @@ impl WorkingDirectory {
         Ok(Self { child, path })
     }
 
-    pub fn address(&self, host: &str, token: &str, view: &str) -> Option<String> {
-        let path = self.path.lock().unwrap();
-        Some(address(host, token, view, path.as_deref()?))
+    pub fn path(&self) -> Option<String> {
+        self.path.lock().unwrap().clone()
     }
 }
 
@@ -63,26 +62,43 @@ impl Drop for WorkingDirectory {
     }
 }
 
-fn address(host: &str, token: &str, view: &str, path: &str) -> String {
-    let mut url = url::Url::parse("rectangle://terminal/").unwrap();
-    url.path_segments_mut()
-        .unwrap()
-        .clear()
-        .push(host)
-        .push(token)
-        .push(view)
-        .extend(path[1..].split('/'));
-    url.into()
+pub fn shell_command(host: &str, token: &str, path: &str) -> String {
+    let docker = "docker exec -it -w";
+    let target = format!("rectangle-tab-{token} /bin/sh");
+    let remote = if path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+    {
+        format!("{docker} {path} {target}")
+    } else if path
+        .chars()
+        .any(|c| c.is_control() || "\\\"$`%!".contains(c))
+    {
+        // CMD and PowerShell expand different characters inside double quotes.
+        // Keep those characters out of the pasted command and decode on the host.
+        let encoded = crate::saved::encode(path);
+        format!(
+            "python3 -c 'import os,sys; a=sys.argv[1:]; a[4]=os.fsdecode(bytes.fromhex(a[4])); os.execvp(a[0],a)' {docker} {encoded} {target}"
+        )
+    } else {
+        let escaped = path.replace('\'', "'\\''");
+        format!("{docker} '{escaped}' {target}")
+    };
+    format!("ssh -t {host} \"{remote}\"")
 }
 
 #[test]
-fn terminal_address_identifies_the_view_and_escapes_the_folder() {
+fn shell_command_quotes_the_folder_for_windows_and_the_remote_shell() {
     assert_eq!(
-        address("user@host", "token", "sh", "/agent/home/A #%"),
-        "rectangle://terminal/user@host/token/sh/agent/home/A%20%23%25"
+        shell_command("user@host", "token", "/agent/home/workspace"),
+        r#"ssh -t user@host "docker exec -it -w /agent/home/workspace rectangle-tab-token /bin/sh""#
     );
     assert_eq!(
-        address("user@host", "token", "main", "/"),
-        "rectangle://terminal/user@host/token/main/"
+        shell_command("user@host", "token", "/Music/Sam's album"),
+        r#"ssh -t user@host "docker exec -it -w '/Music/Sam'\''s album' rectangle-tab-token /bin/sh""#
     );
+    let path = "/Music/$x`x\"x%x!\nx";
+    let command = shell_command("user@host", "token", path);
+    assert!(command.contains(&crate::saved::encode(path)));
+    assert!(!command.contains(path));
 }
