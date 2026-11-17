@@ -378,7 +378,7 @@ case $requested in
         exit ;;
 esac
 case $requested in
-    'agent-view '*|'agent-files '*|'agent-upload '*)
+    'agent-view '*|'agent-files '*|'agent-upload '*|'agent-file '*|'agent-clipboard '*)
         operation=${requested%% *}
         fields=${requested#* }
         token=${fields%% *}
@@ -390,18 +390,39 @@ case $requested in
 ${fields#* }
 EOF
         case $operation in
+            agent-clipboard)
+                [ -z "$path$file$size$extra" ] || exit 1
+                case $action in sh) display=100 ;; freebuff) display=101 ;; edit) display=103 ;; *) exit 1 ;; esac
+                exec docker exec -i -e "DISPLAY=:$display" "$name" python3 -I /opt/rectangle/clipboard-stream.py ;;
             agent-view)
-                case $action in sh|freebuff|files) ;; *) exit 1 ;; esac
-                [ -z "$path" ] || exit 1
-                exec docker exec -i "$name" sh -c "$(cat "$config/agent-view")" agent-view "$action" ;;
+                case $action in
+                    sh|freebuff|files)
+                        [ -z "$path" ] || exit 1
+                        exec docker exec -i "$name" sh -c "$(cat "$config/agent-view")" agent-view "$action" ;;
+                    edit)
+                        [ -n "$path" ] && [ -n "$file" ] && [ -z "$size$extra" ] || exit 1
+                        exec docker exec -i "$name" sh -c "$(cat "$config/agent-view")" agent-view edit +                            "$(cat "$config/agent-files.py")" "$path" "$file" ;;
+                    *) exit 1 ;;
+                esac ;;
             agent-files)
                 case $path in ''|*[!0-9]*) exit 1 ;; esac
-                [ -z "$file" ] || exit 1
-                exec docker exec "$name" python3 -I -c "$(cat "$config/agent-files.py")" list "$action" "$path" ;;
+                case $file in ''|asc|desc) ;; *) exit 1 ;; esac
+                [ -z "$size$extra" ] || exit 1
+                exec docker exec "$name" python3 -I -c "$(cat "$config/agent-files.py")" list "$action" "$path" "${file:-asc}" ;;
             agent-upload)
                 case $file in ''|*[!0-9]*) exit 1 ;; esac
                 [ -z "$size$extra" ] || exit 1
                 exec docker exec -i "$name" python3 -I -c "$(cat "$config/agent-files.py")" upload "$action" "$path" "$file" ;;
+            agent-file)
+                case $action in
+                    download|delete)
+                        [ -n "$file" ] && [ -z "$size$extra" ] || exit 1
+                        exec docker exec "$name" python3 -I -c "$(cat "$config/agent-files.py")" "$action" "$path" "$file" ;;
+                    rename)
+                        [ -n "$file" ] && [ -n "$size" ] && [ -n "$extra" ] || exit 1
+                        exec docker exec "$name" python3 -I -c "$(cat "$config/agent-files.py")" rename "$path" "$file" "$size" "$extra" ;;
+                    *) exit 1 ;;
+                esac ;;
         esac ;;
     'agent-preview '*|'agent-preview-check '*)
         operation=${requested%% *}

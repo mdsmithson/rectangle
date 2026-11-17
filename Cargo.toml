@@ -1,6 +1,6 @@
 [package]
 name = "rectangle"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 license = "Apache-2.0"
 description = "A Windows client for browser and terminal sessions on your own Linux server"
@@ -13,7 +13,7 @@ image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
 url = "=2.5.8"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Media_Audio"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Media_Audio", "Win32_UI_Controls_Dialogs"] }
 
 [profile.release]
 lto = "thin"

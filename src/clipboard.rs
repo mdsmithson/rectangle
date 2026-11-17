@@ -32,7 +32,21 @@ impl Clipboard {
         token: &str,
         repaint: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
-        let remote = format!("exec ~/.local/bin/rectangle-session clipboard {token}");
+        Self::start_view(host, identity, token, None, repaint)
+    }
+
+    pub fn start_view(
+        host: &str,
+        identity: Option<&Path>,
+        token: &str,
+        view: Option<&str>,
+        repaint: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
+        let remote = if let Some(view) = view {
+            format!("exec ~/.local/bin/rectangle-session agent-clipboard {token} {view}")
+        } else {
+            format!("exec ~/.local/bin/rectangle-session clipboard {token}")
+        };
         let mut child = ssh_command(host, identity, &remote)?
             .stderr(Stdio::null())
             .spawn()?;

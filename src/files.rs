@@ -1,52 +1,213 @@
-use crate::{Connection, MUTED, saved, session};
+use crate::{Connection, MUTED, saved};
 use eframe::egui::{self, Color32, RichText};
 use std::{
-    fs::File,
     io,
-    path::PathBuf,
-    process::Stdio,
-    sync::mpsc::{self, Receiver, TryRecvError},
-    thread,
+    path::{Path, PathBuf},
+    sync::mpsc::{Receiver, TryRecvError},
+    time::Duration,
 };
 
-const PAGE_SIZE: usize = 150;
+mod transfer;
+use transfer::{Job, Work};
+const PAGE: usize = 150;
 const HOME: &str = "/agent/home";
 
+#[derive(Clone)]
 struct Entry {
-    kind: &'static str,
+    kind: char,
     bytes: u64,
     name: String,
+    created: String,
+    modified: String,
+}
+impl Entry {
+    fn kind(&self) -> &str {
+        match self.kind {
+            'd' => "Folder",
+            'f' => Path::new(&self.name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("File"),
+            _ => "Other",
+        }
+    }
+    fn size(&self) -> String {
+        if self.kind == 'd' {
+            "—".into()
+        } else {
+            transfer::size(self.bytes)
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Layout {
+    Large,
+    Medium,
+    Small,
+    List,
+    Details,
+}
+impl Layout {
+    const ALL: [(Self, &'static str); 5] = [
+        (Self::Large, "Large icons"),
+        (Self::Medium, "Medium icons"),
+        (Self::Small, "Small icons"),
+        (Self::List, "List view"),
+        (Self::Details, "Detail view"),
+    ];
+    fn label(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|(layout, _)| *layout == self)
+            .unwrap()
+            .1
+    }
+}
+
+#[derive(Clone)]
+struct Drag {
+    token: String,
+    directory: String,
+    name: String,
+}
+enum Prompt {
+    Rename(Entry, String),
+    Delete(Entry),
+}
+enum Action {
+    Open(String),
+    Prompt(Prompt),
+    Work(Work),
+    Download(Entry),
+    Edit(Entry),
+}
+pub struct FileEditor {
+    pub directory: String,
+    pub name: String,
 }
 
 pub struct Explorer {
     path: String,
+    back: Vec<String>,
+    forward: Vec<String>,
     offset: usize,
     total: usize,
     entries: Vec<Entry>,
+    layout: Layout,
+    descending: bool,
     listing: Option<Receiver<io::Result<String>>>,
-    upload: Option<Receiver<Vec<String>>>,
+    job: Option<Job>,
+    prompt: Option<Prompt>,
     status: Option<(bool, String)>,
-    listed: bool,
+    refresh: bool,
 }
 
 impl Default for Explorer {
     fn default() -> Self {
         Self {
             path: format!("{HOME}/workspace"),
+            back: Vec::new(),
+            forward: Vec::new(),
             offset: 0,
             total: 0,
             entries: Vec::new(),
+            layout: Layout::Medium,
+            descending: false,
             listing: None,
-            upload: None,
+            job: None,
+            prompt: None,
             status: None,
-            listed: false,
+            refresh: true,
         }
     }
 }
 
 impl Explorer {
     pub fn uploading(&self) -> bool {
-        self.upload.is_some()
+        self.job.is_some()
+    }
+    fn reset(&mut self) {
+        self.offset = 0;
+        self.total = 0;
+        self.entries.clear();
+        self.status = None;
+        self.listing = None;
+        self.refresh = true;
+        self.prompt = None;
+    }
+    fn open(&mut self, path: String) {
+        if path != self.path {
+            self.back.push(std::mem::replace(&mut self.path, path));
+            self.forward.clear();
+            self.reset();
+        }
+    }
+    fn history(&mut self, back: bool) {
+        let (from, to) = if back {
+            (&mut self.back, &mut self.forward)
+        } else {
+            (&mut self.forward, &mut self.back)
+        };
+        if let Some(path) = from.pop() {
+            to.push(std::mem::replace(&mut self.path, path));
+            self.reset();
+        }
+    }
+    pub fn address(&self, host: &str, token: &str) -> String {
+        address(host, token, &self.path)
+    }
+    pub fn navigate(&mut self, host: &str, token: &str, value: &str) -> io::Result<()> {
+        if self.job.is_some() {
+            return Err(io::Error::other("Finish the active file operation first."));
+        }
+        let path = if value.starts_with('/') {
+            value.to_owned()
+        } else {
+            let invalid = || io::Error::other("Enter an Agent folder URL or an absolute path.");
+            let parsed = url::Url::parse(value).map_err(|_| invalid())?;
+            if parsed.scheme() != "rectangle"
+                || parsed.host_str() != Some("files")
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.port().is_some()
+            {
+                return Err(invalid());
+            }
+            let mut parts = parsed
+                .path_segments()
+                .into_iter()
+                .flatten()
+                .map(decode_segment);
+            if parts.next().transpose()?.as_deref() != Some(host)
+                || parts.next().transpose()?.as_deref() != Some(token)
+            {
+                return Err(io::Error::other(
+                    "This address belongs to a different host or Agent.",
+                ));
+            }
+            let parts = parts.collect::<io::Result<Vec<_>>>()?;
+            if parts.iter().any(|part| part.contains('/')) {
+                return Err(invalid());
+            }
+            format!("/{}", parts.join("/"))
+        };
+        if path.len() > 4096
+            || path.contains('\0')
+            || path.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err(io::Error::other("Invalid Agent folder path."));
+        }
+        self.open(format!(
+            "/{}",
+            path.split('/')
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("/")
+        ));
+        Ok(())
     }
 
     pub fn show(
@@ -55,188 +216,431 @@ impl Explorer {
         connection: &Connection,
         token: &str,
         interactive: bool,
-    ) -> bool {
+        accepts_drop: bool,
+        pane: egui::Rect,
+    ) -> (bool, Option<FileEditor>) {
         let mut activity = false;
-        if let Some(job) = &self.upload {
-            match job.try_recv() {
-                Ok(errors) => {
-                    self.upload = None;
-                    self.status = Some(if errors.is_empty() {
-                        (true, "Upload complete".into())
-                    } else {
-                        (false, errors.join("\n"))
+        if let Some(job) = &self.job {
+            match job.result.try_recv() {
+                Err(TryRecvError::Empty) => {
+                    ui.ctx().request_repaint_after(Duration::from_millis(100))
+                }
+                result => {
+                    let result = result.unwrap_or_else(|_| {
+                        Err(io::Error::other("Operation stopped before confirmation."))
                     });
-                    self.listed = false;
+                    self.job = None;
+                    self.status = Some(match result {
+                        Ok(()) => (true, "Done.".into()),
+                        Err(error) => (false, error.to_string()),
+                    });
+                    self.refresh = true;
                 }
-                Err(TryRecvError::Disconnected) => {
-                    self.upload = None;
-                    self.status = Some((false, "Upload stopped before confirmation.".into()));
-                }
-                Err(TryRecvError::Empty) => {}
             }
         }
-        if let Some(job) = &self.listing {
-            match job.try_recv() {
+        if let Some(listing) = &self.listing {
+            match listing.try_recv() {
                 Err(TryRecvError::Empty) => {}
-                response => {
+                result => {
                     self.listing = None;
-                    match response
+                    match result
                         .map_err(|_| io::Error::other("Directory listing disconnected."))
-                        .and_then(|result| result)
+                        .and_then(|r| r)
                         .and_then(|data| parse_listing(&data))
                     {
                         Ok((total, entries)) => {
                             self.total = total;
+                            if self.offset > 0 && self.offset >= total {
+                                self.offset = total.saturating_sub(1) / PAGE * PAGE;
+                                self.refresh = true;
+                            }
                             self.entries = entries;
                         }
-                        Err(error) => self.status = Some((false, error.to_string())),
+                        Err(error) => {
+                            self.entries.clear();
+                            self.status = Some((false, error.to_string()));
+                        }
                     }
                 }
             }
         }
-
-        let enabled = self.listing.is_none() && self.upload.is_none();
-        let mut next_dir = None;
-        let mut refresh = false;
-        ui.horizontal(|ui| {
+        let enabled =
+            interactive && self.listing.is_none() && self.job.is_none() && self.prompt.is_none();
+        let mut action = None;
+        ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(enabled && self.path != "/", egui::Button::new("Up"))
+                .add_enabled(enabled && !self.back.is_empty(), egui::Button::new("‹"))
+                .on_hover_text("Back")
                 .clicked()
             {
-                let (parent, _) = self.path.rsplit_once('/').unwrap_or(("/", ""));
-                next_dir = Some(if parent.is_empty() { "/" } else { parent }.to_owned());
+                self.history(true);
+                activity = true;
+            }
+            if ui
+                .add_enabled(enabled && !self.forward.is_empty(), egui::Button::new("›"))
+                .on_hover_text("Forward")
+                .clicked()
+            {
+                self.history(false);
+                activity = true;
+            }
+            if ui
+                .add_enabled(
+                    enabled && self.path != "/",
+                    egui::Button::new("Parent folder"),
+                )
+                .clicked()
+            {
+                let (parent, _) = self.path.rsplit_once('/').unwrap();
+                action = Some(Action::Open(
+                    if parent.is_empty() { "/" } else { parent }.into(),
+                ));
             }
             if ui
                 .add_enabled(enabled, egui::Button::new("Refresh"))
                 .clicked()
             {
-                refresh = true;
+                self.refresh = true;
+                self.status = None;
+                activity = true;
             }
-            ui.label(RichText::new(&self.path).monospace());
-        });
-        let writable = self.path == HOME || self.path.starts_with(&format!("{HOME}/"));
-        if writable {
-            ui.label(
-                RichText::new("Drop files here from Windows to upload to this folder.")
-                    .color(MUTED),
-            );
-        }
-        if self.upload.is_some() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Uploading…");
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(if self.descending {
+                        "↓ Z–A"
+                    } else {
+                        "↑ A–Z"
+                    }),
+                )
+                .on_hover_text("Toggle name sort")
+                .clicked()
+            {
+                self.descending = !self.descending;
+                self.reset();
+                activity = true;
+            }
+            ui.add_enabled_ui(interactive, |ui| {
+                egui::ComboBox::from_id_salt("file layout")
+                    .selected_text(self.layout.label())
+                    .show_ui(ui, |ui| {
+                        for (layout, label) in Layout::ALL {
+                            ui.selectable_value(&mut self.layout, layout, label);
+                        }
+                    });
             });
-        } else if let Some((success, message)) = &self.status {
-            ui.label(RichText::new(message).color(if *success {
-                MUTED
-            } else {
-                Color32::LIGHT_RED
-            }));
+        });
+        ui.label(RichText::new(&self.path).monospace());
+        let writable = writable(&self.path);
+        if writable {
+            ui.label(RichText::new("Drop local files in this pane to upload.").color(MUTED));
+        }
+        if let Some(job) = &self.job {
+            job.show(ui, interactive);
+        } else if let Some((ok, message)) = &self.status {
+            ui.colored_label(if *ok { MUTED } else { Color32::LIGHT_RED }, message);
+        }
+        if let Some(mut prompt) = self.prompt.take() {
+            let mut keep = true;
+            ui.add_enabled_ui(interactive, |ui| {
+                ui.group(|ui| {
+                    match &mut prompt {
+                        Prompt::Rename(entry, new_name) => {
+                            ui.label(format!("Rename “{}”", entry.name));
+                            ui.text_edit_singleline(new_name);
+                            if ui
+                                .add_enabled(
+                                    valid_name(new_name) && *new_name != entry.name,
+                                    egui::Button::new("Rename"),
+                                )
+                                .clicked()
+                            {
+                                action = Some(Action::Work(Work::Rename {
+                                    directory: self.path.clone(),
+                                    name: entry.name.clone(),
+                                    to_directory: self.path.clone(),
+                                    to_name: new_name.clone(),
+                                }));
+                                keep = false;
+                            }
+                        }
+                        Prompt::Delete(entry) => {
+                            ui.label(if entry.kind == 'd' {
+                                format!("Permanently delete “{}” and its contents?", entry.name)
+                            } else {
+                                format!("Permanently delete “{}”?", entry.name)
+                            });
+                            if ui.button("Yes, delete").clicked() {
+                                action = Some(Action::Work(Work::Delete {
+                                    directory: self.path.clone(),
+                                    name: entry.name.clone(),
+                                }));
+                                keep = false;
+                            }
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                })
+            });
+            if keep {
+                self.prompt = Some(prompt);
+            }
         }
         ui.separator();
         if self.listing.is_some() {
             ui.spinner();
         }
-        egui::ScrollArea::vertical()
-            .id_salt(&self.path)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                for entry in &self.entries {
-                    ui.horizontal(|ui| {
-                        if entry.kind == "Folder" {
-                            if ui
-                                .add_enabled(enabled, egui::Button::new(&entry.name))
-                                .clicked()
-                            {
-                                next_dir = Some(format!(
-                                    "{}/{}",
-                                    self.path.trim_end_matches('/'),
-                                    entry.name
-                                ));
-                            }
-                        } else {
-                            ui.label(&entry.name);
-                        }
-                        ui.label(
-                            RichText::new(if entry.kind == "File" {
-                                format!("{} bytes", entry.bytes)
-                            } else {
-                                entry.kind.to_owned()
-                            })
-                            .small()
-                            .color(MUTED),
-                        );
-                    });
-                }
-            });
-        if self.total > PAGE_SIZE {
+        if self.total > PAGE {
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(enabled && self.offset > 0, egui::Button::new("Previous"))
-                    .clicked()
-                {
-                    self.offset = self.offset.saturating_sub(PAGE_SIZE);
-                    refresh = true;
-                }
-                if ui
                     .add_enabled(
-                        enabled && self.offset + PAGE_SIZE < self.total,
-                        egui::Button::new("Next"),
+                        enabled && self.offset > 0,
+                        egui::Button::new("Previous page"),
                     )
                     .clicked()
                 {
-                    self.offset += PAGE_SIZE;
-                    refresh = true;
+                    self.offset = self.offset.saturating_sub(PAGE);
+                    self.refresh = true;
+                    activity = true;
+                }
+                if ui
+                    .add_enabled(
+                        enabled && self.offset.saturating_add(PAGE) < self.total,
+                        egui::Button::new("Next page"),
+                    )
+                    .clicked()
+                {
+                    self.offset += PAGE;
+                    self.refresh = true;
+                    activity = true;
                 }
             });
         }
-        if interactive && enabled {
-            let dropped = ui.input(|input| {
-                input
-                    .raw
+        let path = &self.path;
+        let scroll = if matches!(self.layout, Layout::List | Layout::Details) {
+            egui::ScrollArea::both()
+        } else {
+            egui::ScrollArea::vertical()
+        };
+        scroll
+            .id_salt(("files", path, self.offset))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let mut item = |ui: &mut egui::Ui, entry: &Entry, icon: Option<(f32, f32)>| {
+                    let glyph = if entry.kind == 'd' { "▣" } else { "▤" };
+                    let response = if let Some((width, scale)) = icon {
+                        let label =
+                            egui::RichText::new(format!("{glyph}\n{}", entry.name)).size(scale);
+                        ui.add_enabled(
+                            enabled,
+                            egui::Button::new(label)
+                                .wrap()
+                                .sense(egui::Sense::click_and_drag())
+                                .min_size(egui::vec2(width, scale * 3.1)),
+                        )
+                    } else {
+                        ui.add_enabled(
+                            enabled,
+                            egui::Button::new(format!("{glyph} {}", entry.name)).frame(false),
+                        )
+                    };
+                    if enabled
+                        && entry.kind == 'd'
+                        && (response.double_clicked() || (icon.is_none() && response.clicked()))
+                    {
+                        action = Some(Action::Open(join(path, &entry.name)));
+                    }
+                    if enabled && writable && icon.is_some() {
+                        response.dnd_set_drag_payload(Drag {
+                            token: token.into(),
+                            directory: path.clone(),
+                            name: entry.name.clone(),
+                        });
+                        if entry.kind == 'd'
+                            && let Some(source) = response.dnd_release_payload::<Drag>()
+                            && source.token == token
+                            && (source.directory != *path || source.name != entry.name)
+                        {
+                            action = Some(Action::Work(Work::Rename {
+                                directory: source.directory.clone(),
+                                name: source.name.clone(),
+                                to_directory: join(path, &entry.name),
+                                to_name: source.name.clone(),
+                            }));
+                        }
+                    }
+                    if enabled {
+                        response.context_menu(|ui| {
+                            if ui.button("Copy full path").clicked() {
+                                ui.ctx().copy_text(address(
+                                    connection.host.trim(),
+                                    token,
+                                    &join(path, &entry.name),
+                                ));
+                                ui.close();
+                            }
+                            for (allowed, label, next) in [
+                                (
+                                    writable,
+                                    "Rename",
+                                    Action::Prompt(Prompt::Rename(
+                                        entry.clone(),
+                                        entry.name.clone(),
+                                    )),
+                                ),
+                                (
+                                    writable && entry.kind == 'f',
+                                    "Edit in Vim",
+                                    Action::Edit(entry.clone()),
+                                ),
+                                (
+                                    writable,
+                                    "Delete…",
+                                    Action::Prompt(Prompt::Delete(entry.clone())),
+                                ),
+                                (
+                                    writable && entry.kind == 'f',
+                                    "Download…",
+                                    Action::Download(entry.clone()),
+                                ),
+                            ] {
+                                if ui.add_enabled(allowed, egui::Button::new(label)).clicked() {
+                                    action = Some(next);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                };
+                match self.layout {
+                    Layout::Large | Layout::Medium | Layout::Small => {
+                        let icon = match self.layout {
+                            Layout::Large => (126.0, 20.0),
+                            Layout::Medium => (100.0, 16.0),
+                            _ => (82.0, 12.0),
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            for entry in &self.entries {
+                                item(ui, entry, Some(icon));
+                            }
+                        });
+                    }
+                    Layout::List => {
+                        for entry in &self.entries {
+                            ui.horizontal(|ui| {
+                                item(ui, entry, None);
+                                ui.label(format!(
+                                    "Created {}  ·  Modified {}  ·  {}  ·  {}",
+                                    entry.created,
+                                    entry.modified,
+                                    entry.kind(),
+                                    entry.size()
+                                ));
+                            });
+                        }
+                    }
+                    Layout::Details => {
+                        egui::Grid::new("file details")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for label in [
+                                    "Name",
+                                    "Date created (UTC)",
+                                    "Date modified (UTC)",
+                                    "Type",
+                                    "Size",
+                                ] {
+                                    ui.strong(label);
+                                }
+                                ui.end_row();
+                                for entry in &self.entries {
+                                    item(ui, entry, None);
+                                    for label in [
+                                        entry.created.as_str(),
+                                        entry.modified.as_str(),
+                                        entry.kind(),
+                                        &entry.size(),
+                                    ] {
+                                        ui.label(label);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                }
+            });
+        if enabled
+            && accepts_drop
+            && pane.contains(ui.ctx().pointer_latest_pos().unwrap_or(pane.center()))
+        {
+            let files: Vec<PathBuf> = ui.input(|i| {
+                i.raw
                     .dropped_files
                     .iter()
-                    .map(|file| file.path().to_owned())
-                    .collect::<Vec<_>>()
+                    .map(|f| f.path().to_path_buf())
+                    .collect()
             });
-            if !dropped.is_empty() {
-                activity = true;
+            if !files.is_empty() {
                 if writable {
-                    self.status = None;
-                    self.upload = Some(upload(
-                        ui.ctx(),
-                        connection.clone(),
-                        token.to_owned(),
-                        self.path.clone(),
-                        dropped,
-                    ));
+                    action = Some(Action::Work(Work::Upload {
+                        directory: self.path.clone(),
+                        files,
+                    }));
                 } else {
-                    self.status = Some((
-                        false,
-                        "Open a folder under /agent/home to upload files.".into(),
-                    ));
+                    self.status =
+                        Some((false, "Open a folder under /agent/home to upload.".into()));
                 }
             }
         }
-        if let Some(next) = next_dir {
+        let mut editor = None;
+        if let Some(action) = action {
             activity = true;
-            self.path = next;
-            self.offset = 0;
-            self.total = 0;
-            self.entries.clear();
-            self.listed = false;
-        } else if refresh {
-            self.status = None;
-            self.listed = false;
+            let directory = self.path.clone();
+            let work = match action {
+                Action::Open(path) => {
+                    self.open(path);
+                    None
+                }
+                Action::Prompt(prompt) => {
+                    self.prompt = Some(prompt);
+                    None
+                }
+                Action::Work(work) => Some(work),
+                Action::Download(entry) => match transfer::save_as(&entry.name) {
+                    Ok(Some(destination)) => Some(Work::Download {
+                        directory,
+                        name: entry.name,
+                        destination,
+                    }),
+                    Ok(None) => None,
+                    Err(error) => {
+                        self.status = Some((false, error.to_string()));
+                        None
+                    }
+                },
+                Action::Edit(entry) => {
+                    editor = Some(FileEditor {
+                        directory,
+                        name: entry.name,
+                    });
+                    None
+                }
+            };
+            if let Some(work) = work {
+                self.status = None;
+                self.job = Some(transfer::start(ui.ctx(), connection, token, work));
+            }
         }
-        // A failed listing is retried on Refresh or when moving to another folder.
-        if self.listing.is_none() && self.upload.is_none() && !self.listed {
-            self.listed = true;
+        if self.refresh && self.listing.is_none() && self.job.is_none() {
+            self.refresh = false;
             let ctx = ui.ctx().clone();
             let command = format!(
-                "agent-files {token} {} {}",
+                "agent-files {token} {} {}{}",
                 saved::encode(&self.path),
-                self.offset
+                self.offset,
+                if self.descending { " desc" } else { "" }
             );
             match saved::run(
                 connection.host.trim(),
@@ -248,104 +652,111 @@ impl Explorer {
                 Err(error) => self.status = Some((false, error.to_string())),
             }
         }
-        activity || refresh
+        (activity, editor)
     }
 }
 
+fn writable(path: &str) -> bool {
+    path == HOME
+        || path
+            .strip_prefix(HOME)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+fn valid_name(name: &str) -> bool {
+    !matches!(name, "" | "." | "..") && name.len() <= 255 && !name.contains(['/', '\0'])
+}
+fn join(path: &str, name: &str) -> String {
+    format!("{}/{name}", path.trim_end_matches('/'))
+}
+
+fn address(host: &str, token: &str, path: &str) -> String {
+    let mut url = url::Url::parse("rectangle://files/").unwrap();
+    url.path_segments_mut()
+        .unwrap()
+        .clear()
+        .push(host)
+        .push(token)
+        .extend(path.split('/').filter(|part| !part.is_empty()));
+    url.into()
+}
+fn decode_segment(value: &str) -> io::Result<String> {
+    let invalid = || io::Error::other("Invalid escape in Agent folder URL.");
+    let mut input = value.bytes();
+    let mut output = Vec::new();
+    while let Some(byte) = input.next() {
+        output.push(if byte == b'%' {
+            let hex = |b: Option<u8>| {
+                b.and_then(|b| (b as char).to_digit(16))
+                    .map(|b| b as u8)
+                    .ok_or_else(invalid)
+            };
+            hex(input.next())? * 16 + hex(input.next())?
+        } else {
+            byte
+        });
+    }
+    String::from_utf8(output).map_err(|_| invalid())
+}
 fn parse_listing(data: &str) -> io::Result<(usize, Vec<Entry>)> {
     let invalid = || io::Error::other("Invalid File Manager directory listing.");
     let mut lines = data.lines();
-    let total = lines
+    let (version, total) = lines
         .next()
-        .and_then(|line| line.strip_prefix("RECTFILES1 "))
-        .and_then(|total| total.parse().ok())
+        .and_then(|line| line.split_once(' '))
         .ok_or_else(invalid)?;
+    if !matches!(version, "RECTFILES1" | "RECTFILES2") {
+        return Err(invalid());
+    }
+    let total = total.parse().map_err(|_| invalid())?;
     let mut entries = Vec::new();
     for line in lines {
-        let mut fields = line.splitn(3, ' ');
+        let mut fields = line.split_ascii_whitespace();
         let kind = match fields.next() {
-            Some("d") => "Folder",
-            Some("f") => "File",
-            Some("o") => "Other",
+            Some("d") => 'd',
+            Some("f") => 'f',
+            Some("o") => 'o',
             _ => return Err(invalid()),
         };
         let bytes = fields
             .next()
-            .and_then(|size| size.parse().ok())
+            .and_then(|field| field.parse().ok())
             .ok_or_else(invalid)?;
         let name = fields
             .next()
-            .and_then(|name| saved::decode(name, 510))
+            .and_then(|field| saved::decode(field, 510))
             .ok_or_else(invalid)?;
-        if matches!(name.as_str(), "" | "." | "..") || name.contains('/') {
+        if !valid_name(&name) || entries.len() >= PAGE {
             return Err(invalid());
         }
-        entries.push(Entry { kind, bytes, name });
+        let mut date = || {
+            fields
+                .next()
+                .and_then(|field| saved::decode(field, 64))
+                .unwrap_or_else(|| "—".into())
+        };
+        let (created, modified) = (date(), date());
+        entries.push(Entry {
+            kind,
+            bytes,
+            name,
+            created,
+            modified,
+        });
     }
     Ok((total, entries))
 }
 
-fn upload(
-    ctx: &egui::Context,
-    connection: Connection,
-    token: String,
-    destination: String,
-    files: Vec<PathBuf>,
-) -> Receiver<Vec<String>> {
-    let (send, receive) = mpsc::channel();
-    let ctx = ctx.clone();
-    thread::spawn(move || {
-        let errors = files
-            .into_iter()
-            .filter_map(|path| {
-                upload_file(&connection, &token, &destination, &path)
-                    .err()
-                    .map(|error| format!("{}: {error}", path.display()))
-            })
-            .collect();
-        let _ = send.send(errors);
-        ctx.request_repaint();
-    });
-    receive
-}
-
-fn upload_file(
-    connection: &Connection,
-    token: &str,
-    destination: &str,
-    path: &std::path::Path,
-) -> io::Result<()> {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| io::Error::other("The local file name is not valid UTF-8."))?;
-    let mut file = File::open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::other("Select a regular file."));
-    }
-    let command = format!(
-        "exec ~/.local/bin/rectangle-session agent-upload {token} {} {} {}",
-        saved::encode(destination),
-        saved::encode(name),
-        metadata.len()
-    );
-    let mut child =
-        session::ssh_command(connection.host.trim(), connection.key.as_deref(), &command)?
-            .stdout(Stdio::piped())
-            .spawn()?;
-    let copied = io::copy(&mut file, &mut child.stdin.take().unwrap());
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
-    }
-    copied?;
-    if output.stdout != b"OK\n" {
-        return Err(io::Error::other(
-            "The server did not confirm the uploaded file.",
-        ));
-    }
-    Ok(())
+#[test]
+fn folder_address_round_trips_and_cannot_switch_agents() {
+    let mut explorer = Explorer::default();
+    let host = "alice@host.example";
+    let input = "/agent/home/A & B?#/日本語";
+    let uri = address(host, "abcd", input);
+    explorer.navigate(host, "abcd", &uri).unwrap();
+    assert_eq!(explorer.path, input);
+    assert!(explorer.navigate(host, "efgh", &uri).is_err());
+    explorer.history(true);
+    assert_eq!(explorer.path, "/agent/home/workspace");
+    explorer.history(false);
+    assert_eq!(explorer.path, input);
 }

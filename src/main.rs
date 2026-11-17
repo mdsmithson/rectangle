@@ -310,6 +310,7 @@ struct Tab {
     agent_port: Option<u16>,
     agent_view: AgentView,
     agent_owner: Option<u64>,
+    file_editor: bool,
     explorer: files::Explorer,
     resize_target: Option<(rfb::Resolution, Instant)>,
     resize_sent: Option<rfb::Resolution>,
@@ -1187,12 +1188,60 @@ impl Rectangle {
             .unwrap_or(index)
     }
 
+    fn open_file_editor(&mut self, ctx: &egui::Context, index: usize, editor: files::FileEditor) {
+        let owner = &self.tabs[self.agent_owner_index(index)];
+        if self.tabs.iter().any(|tab| {
+            tab.agent_owner == Some(owner.id) && tab.file_editor && tab.session.is_some()
+        }) {
+            self.error =
+                Some("Close this Agent’s existing Vim tab before editing another file.".into());
+            return;
+        }
+        if self.tabs.len() >= MAX_TABS {
+            self.error = Some("Close a tab before opening Vim.".into());
+            return;
+        }
+        let (Some(session), Some(port)) = (&owner.session, owner.agent_port) else {
+            return;
+        };
+        let repaint = ctx.clone();
+        match Session::agent_editor(
+            owner.connection.host.trim(),
+            owner.connection.key.as_deref(),
+            &session.token,
+            &editor,
+            move || repaint.request_repaint(),
+        ) {
+            Ok(session) => {
+                self.error = None;
+                self.next_id += 1;
+                self.tabs.push(Tab {
+                    id: self.next_id,
+                    backend: owner.backend,
+                    connection: owner.connection.clone(),
+                    title: format!("SH Terminal · {}", editor.name),
+                    agent_port: Some(port),
+                    agent_view: AgentView::Shell,
+                    agent_owner: Some(owner.id),
+                    file_editor: true,
+                    always_on: owner.always_on,
+                    session: Some(session),
+                    started: Some(Instant::now()),
+                    ..Default::default()
+                });
+                self.select_tab(self.tabs.len() - 1);
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
     fn open_agent_view(&mut self, ctx: &egui::Context, index: usize, kind: AgentView) {
         let owner = &self.tabs[self.agent_owner_index(index)];
         let owner_id = owner.id;
         if let Some(existing) = self.tabs.iter().position(|tab| {
             (tab.id == owner_id || tab.agent_owner == Some(owner_id))
                 && tab.agent_view == kind
+                && !tab.file_editor
                 && tab.session.is_some()
         }) {
             self.select_tab(existing);
@@ -1749,7 +1798,7 @@ impl Rectangle {
                 ui.separator();
                 ui.horizontal(|ui| {
                     let name = if draft.image > 1 { "Build and open" } else { "Open tab" };
-                    let source = match draft.image { 0 => images::BROWSER, 1 => images::AGENT, index => &self.agent_images[index - 2].dockerfile };
+                    let source = match draft.image { 0 => images::BROWSER, 1 | 2 => images::AGENT, index => &self.agent_images[index - 3].dockerfile };
                     let edits_saved = draft.dockerfile.as_ref().is_none_or(|draft| draft == source);
                     if ui.add_enabled(self.job.is_none() && edits_saved && self.tabs.len() < MAX_TABS, egui::Button::new(name))
                         .on_disabled_hover_text("Save Dockerfile changes as a new image before opening.").clicked() { choice = 1; }
@@ -2228,18 +2277,28 @@ impl Rectangle {
     ) -> (Option<bool>, bool) {
         let id = ui.make_persistent_id(("rectangle address", self.address_tab));
         let focused = ui.memory(|memory| memory.has_focus(id));
-        let page = self
+        let tab = self
             .address_tab
-            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
-            .and_then(|tab| tab.navigation.as_ref())
-            .and_then(navigation::Navigation::state);
+            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id));
+        let files = tab.is_some_and(|tab| tab.agent_view == AgentView::Files);
         let enabled = enabled
             && self.job.is_none()
             && (self.address_tab.is_some() || self.tabs.len() < MAX_TABS);
         if !focused && self.address_tab.is_some() {
-            self.browser_address = page
-                .as_ref()
-                .map(|page| page.url.clone())
+            self.browser_address = tab
+                .and_then(|tab| {
+                    if files {
+                        tab.session.as_ref().map(|session| {
+                            tab.explorer
+                                .address(tab.connection.host.trim(), &session.token)
+                        })
+                    } else {
+                        tab.navigation
+                            .as_ref()
+                            .and_then(navigation::Navigation::state)
+                            .map(|page| page.url)
+                    }
+                })
                 .unwrap_or_default();
         }
         let linked = self.address_tab.is_some();
@@ -2285,7 +2344,9 @@ impl Rectangle {
                         "Search or enter a URL"
                     }),
             )
-            .on_hover_text(if self.address_tab.is_some() {
+            .on_hover_text(if files {
+                "Enter an Agent folder address or an absolute folder path."
+            } else if self.address_tab.is_some() {
                 "Enter navigates this tab. Ctrl+Enter completes a site name."
             } else {
                 "Enter opens a new tab. Ctrl+Enter completes a site name."
@@ -2332,6 +2393,19 @@ impl Rectangle {
             .address_tab
             .and_then(|id| self.tabs.iter_mut().find(|tab| tab.id == id))
         {
+            if tab.agent_view == AgentView::Files {
+                if let Some(session) = &tab.session {
+                    self.error = tab
+                        .explorer
+                        .navigate(tab.connection.host.trim(), &session.token, input)
+                        .err()
+                        .map(|error| error.to_string());
+                    if self.error.is_none() {
+                        tab.last_input = Some(Instant::now());
+                    }
+                }
+                return;
+            }
             let page = if wrapped.is_some() || looks_like_url {
                 settings::startup_page(wrapped.as_deref().unwrap_or(input))
             } else {
@@ -2502,7 +2576,7 @@ impl Rectangle {
                                 tab.snap.is_some()
                             } else {
                                 *i == self.active
-                            }) && tab.agent_port.is_none()
+                            }) && (tab.agent_port.is_none() || tab.agent_view == AgentView::Files)
                                 && tab.session.is_some()
                                 && tab.page_rect.is_some_and(|rect| rect.contains(pos))
                         })
@@ -2617,7 +2691,9 @@ impl Rectangle {
                                     self.job.is_none(),
                                     &mut self.dragging_tab,
                                 );
-                                if tab.agent_port.is_none() && tab.session.is_some() {
+                                if (tab.agent_port.is_none() || tab.agent_view == AgentView::Files)
+                                    && tab.session.is_some()
+                                {
                                     self.address_headers.push((tab.id, header));
                                 }
                                 if let Some(action) = action {
@@ -2792,6 +2868,7 @@ impl Rectangle {
         if filled_vacancy {
             return;
         }
+        let mut edit_file = None;
         for (index, pane) in panes {
             let Some(tab) = self.tabs.get_mut(index) else {
                 continue;
@@ -2813,7 +2890,9 @@ impl Rectangle {
                             self.job.is_none(),
                             &mut self.dragging_tab,
                         );
-                        if tab.agent_port.is_none() && tab.session.is_some() {
+                        if (tab.agent_port.is_none() || tab.agent_view == AgentView::Files)
+                            && tab.session.is_some()
+                        {
                             self.address_headers.push((tab.id, header));
                         }
                         if let Some(action) = action {
@@ -2827,16 +2906,23 @@ impl Rectangle {
                         && let Some(session) = &tab.session
                         && tab.ran
                     {
+                        tab.page_rect = Some(pane);
                         let target = ctx
                             .pointer_latest_pos()
                             .map_or(index == self.active, |pos| pane.contains(pos));
-                        if tab.explorer.show(
+                        let (activity, editor) = tab.explorer.show(
                             ui,
                             &tab.connection,
                             &session.token,
-                            show_cursor && target,
-                        ) {
+                            !block_input,
+                            target,
+                            pane,
+                        );
+                        if activity {
                             tab.last_input = Some(Instant::now());
+                        }
+                        if let Some(editor) = editor {
+                            edit_file = Some((index, editor));
                         }
                         return;
                     }
@@ -2851,6 +2937,9 @@ impl Rectangle {
             );
         }
         if !block_input {
+            if let Some((index, editor)) = edit_file {
+                self.open_file_editor(&ctx, index, editor);
+            }
             if let Some((index, action)) = pane_action {
                 self.apply_tab_action(&ctx, index, action);
             }
@@ -3495,7 +3584,9 @@ impl Rectangle {
                 self.select_tab(index);
             }
             let tab = &self.tabs[index];
-            let target = (tab.agent_port.is_none() && tab.session.is_some()).then_some(tab.id);
+            let target = ((tab.agent_port.is_none() || tab.agent_view == AgentView::Files)
+                && tab.session.is_some())
+            .then_some(tab.id);
             if self.address_tab != target {
                 self.address_tab = target;
                 self.browser_address.clear();
@@ -3621,10 +3712,18 @@ impl Rectangle {
             && let Some(session) = &tab.session
         {
             let repaint = ctx.clone();
-            match clipboard::Clipboard::start(
+            let view = tab.agent_owner.map(|_| {
+                if tab.file_editor {
+                    "edit"
+                } else {
+                    tab.agent_view.command()
+                }
+            });
+            match clipboard::Clipboard::start_view(
                 tab.connection.host.trim(),
                 tab.connection.key.as_deref(),
                 &session.token,
+                view,
                 move || repaint.request_repaint(),
             ) {
                 Ok(clipboard) => tab.clipboard = Some(clipboard),

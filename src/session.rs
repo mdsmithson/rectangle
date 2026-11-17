@@ -236,6 +236,26 @@ impl Session {
         )
     }
 
+    pub fn agent_editor(
+        host: &str,
+        identity: Option<&std::path::Path>,
+        token: &str,
+        editor: &crate::files::FileEditor,
+        repaint: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
+        let directory = crate::saved::encode(&editor.directory);
+        let name = crate::saved::encode(&editor.name);
+        Self::connect(
+            host,
+            identity,
+            &format!(
+                "exec ~/.local/bin/rectangle-session agent-view {token} edit {directory} {name}"
+            ),
+            token.to_owned(),
+            repaint,
+        )
+    }
+
     fn connect(
         host: &str,
         identity: Option<&std::path::Path>,
