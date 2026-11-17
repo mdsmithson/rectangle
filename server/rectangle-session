@@ -106,6 +106,59 @@ check_live() {
     test "$(docker inspect -f '{{if .State.Running}}{{index .Config.Labels "rectangle.profile"}}{{end}}' "rectangle-tab-$1" 2>/dev/null || :)" = "$2"
 }
 case $requested in
+    agent-next-port)
+        bind_ip=127.0.0.1
+        if [ -f "$config/agent-bind-ip" ]; then
+            IFS= read -r bind_ip < "$config/agent-bind-ip" || exit 1
+        fi
+        exec python3 -I -c '
+import errno, ipaddress, json, socket, subprocess, sys
+
+try:
+    address = ipaddress.IPv4Address(sys.argv[1])
+    if address.is_unspecified or address.is_multicast:
+        raise ValueError("invalid Agent bind address")
+    with socket.socket() as probe:
+        probe.bind((str(address), 0))
+    ids = subprocess.check_output(["docker", "ps", "-q"], text=True, timeout=8).split()
+    used = set()
+    for offset in range(0, len(ids), 200):
+        records = subprocess.check_output(
+            ["docker", "inspect", "-f", "[{{json .HostConfig.PortBindings}},{{json .NetworkSettings.Ports}}]", *ids[offset:offset+200]],
+            text=True, timeout=8)
+        for line in records.splitlines():
+            for bindings in json.loads(line):
+                for kind, publications in (bindings or {}).items():
+                    if kind.endswith("/tcp"):
+                        used.update(int(item["HostPort"]) for item in (publications or [])
+                                    if item.get("HostPort", "").isdigit())
+    families = [(socket.AF_INET, "0.0.0.0")]
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::", 0))
+        families.append((socket.AF_INET6, "::"))
+    except OSError:
+        pass
+    for port in range(4000, 65536):
+        if port in used:
+            continue
+        try:
+            for family, interface in families:
+                with socket.socket(family) as probe:
+                    if family == socket.AF_INET6:
+                        probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                    probe.bind((interface, port))
+        except OSError as error:
+            if error.errno in (errno.EADDRINUSE, errno.EACCES):
+                continue
+            raise
+        print(f"RECTAGENTPORT1 {port}")
+        break
+    else:
+        sys.exit("No free Agent TCP port was found from 4000 to 65535.")
+except (OSError, ValueError, subprocess.SubprocessError) as error:
+    sys.exit(f"Could not find a free Agent port: {error}")
+' "$bind_ip" ;;
     'server-update '*)
         fields=${requested#* }; revision=${fields%% *}; target=${fields#* }
         [ "$fields" != "$revision" ] && [ -f "$assets/server-update.py" ] ||
@@ -408,16 +461,20 @@ EOF
         case $operation in
             agent-clipboard)
                 [ -z "$path$file$size$extra" ] || exit 1
-                case $action in sh) display=100 ;; freebuff) display=101 ;; edit) display=103 ;; *) exit 1 ;; esac
+                case $action in
+                    sh) display=100 ;; freebuff) display=101 ;; edit) display=103 ;;
+                    edit10[3-9]|edit11[0-9]|edit12[0-7]) display=${action#edit} ;;
+                    *) exit 1 ;;
+                esac
                 exec docker exec -i -e "DISPLAY=:$display" "$name" python3 -I /opt/rectangle/clipboard-stream.py ;;
             agent-view)
                 case $action in
                     sh|freebuff|files)
                         [ -z "$path" ] || exit 1
                         exec docker exec -i "$name" sh -c "$(cat "$assets/agent-view")" agent-view "$action" ;;
-                    edit)
+                    edit|edit10[3-9]|edit11[0-9]|edit12[0-7])
                         [ -n "$path" ] && [ -n "$file" ] && [ -z "$size$extra" ] || exit 1
-                        exec docker exec -i "$name" sh -c "$(cat "$assets/agent-view")" agent-view edit "$(cat "$assets/agent-files.py")" "$path" "$file" ;;
+                        exec docker exec -i "$name" sh -c "$(cat "$assets/agent-view")" agent-view "$action" "$(cat "$assets/agent-files.py")" "$path" "$file" ;;
                     *) exit 1 ;;
                 esac ;;
             agent-files)
@@ -431,7 +488,7 @@ EOF
                 exec docker exec -i "$name" python3 -I -c "$(cat "$assets/agent-files.py")" upload "$action" "$path" "$file" ;;
             agent-file)
                 case $action in
-                    download|delete)
+                    download|delete|mkdir|new-file)
                         [ -n "$file" ] && [ -z "$size$extra" ] || exit 1
                         exec docker exec "$name" python3 -I -c "$(cat "$assets/agent-files.py")" "$action" "$path" "$file" ;;
                     rename)

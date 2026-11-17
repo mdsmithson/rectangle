@@ -118,6 +118,11 @@ impl Drop for Job {
 }
 
 pub(super) enum Work {
+    Create {
+        directory: String,
+        name: String,
+        folder: bool,
+    },
     Upload {
         directory: String,
         files: Vec<PathBuf>,
@@ -147,6 +152,7 @@ pub(super) fn start(ctx: &egui::Context, connection: &Connection, token: &str, w
     let token = token.to_owned();
     let ctx = ctx.clone();
     let (title, cancellable) = match &work {
+        Work::Create { .. } => ("Creating", false),
         Work::Upload { .. } => ("Uploading", true),
         Work::Download { .. } => ("Downloading", true),
         Work::Delete { .. } => ("Deleting", false),
@@ -168,6 +174,24 @@ pub(super) fn start(ctx: &egui::Context, connection: &Connection, token: &str, w
 fn run(connection: &Connection, token: &str, progress: &Progress, work: Work) -> io::Result<()> {
     let enc = saved::encode;
     match work {
+        Work::Create {
+            directory,
+            name,
+            folder,
+        } => command(
+            connection,
+            progress,
+            &format!(
+                "agent-file {token} {} {} {}",
+                if folder { "mkdir" } else { "new-file" },
+                enc(&directory),
+                enc(&name)
+            ),
+            |stdin, mut stdout| {
+                drop(stdin);
+                expect_ok(&mut stdout)
+            },
+        ),
         Work::Upload { directory, files } => {
             let mut sources = Vec::new();
             let mut errors = Vec::new();

@@ -1,6 +1,6 @@
 [package]
 name = "rectangle"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 license = "Apache-2.0"
 description = "A Windows client for browser and terminal sessions on your own Linux server"

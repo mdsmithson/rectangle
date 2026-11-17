@@ -9,6 +9,8 @@ import stat
 import struct
 import sys
 import uuid
+import re
+import unicodedata
 
 FLAGS = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_RDONLY
 CHUNK = 256 * 1024
@@ -22,6 +24,28 @@ def name(value):
     if value in ("", ".", "..") or "/" in value or "\0" in value:
         raise ValueError("Invalid file name.")
     return value
+
+
+def portable_name(value):
+    name(value)
+    stem = value.split(".", 1)[0].rstrip().upper()
+    if (not value.strip() or value != value.strip() or value.endswith(".")
+            or len(value.encode()) > 255
+            or any(unicodedata.category(c) == "Cc" or c in '<>:"\\|?*' for c in value)
+            or re.fullmatch(r"CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³]", stem)):
+        raise ValueError("Choose a name that is valid on both Linux and Windows.")
+    return value
+
+
+def create(path, filename, folder):
+    entry = portable_name(filename)
+    with directory_fd(path) as directory:
+        if folder:
+            os.mkdir(entry, 0o700, dir_fd=directory)
+        else:
+            os.close(os.open(entry, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory))
+    print("OK")
 
 
 def stamp(seconds):
@@ -209,6 +233,8 @@ if __name__ == "__main__":
             upload(path, decode(arguments[0]), int(arguments[1]))
         elif operation in ("download", "delete", "edit"):
             {"download": download, "delete": delete, "edit": edit}[operation](path, decode(arguments[0]))
+        elif operation in ("mkdir", "new-file"):
+            create(path, decode(arguments[0]), operation == "mkdir")
         elif operation == "rename":
             rename(path, *(decode(value) for value in arguments))
         else:

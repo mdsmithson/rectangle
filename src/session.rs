@@ -241,6 +241,7 @@ impl Session {
         identity: Option<&std::path::Path>,
         token: &str,
         editor: &crate::files::FileEditor,
+        display: u16,
         repaint: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
         let directory = crate::saved::encode(&editor.directory);
@@ -249,7 +250,7 @@ impl Session {
             host,
             identity,
             &format!(
-                "exec ~/.local/bin/rectangle-session agent-view {token} edit {directory} {name}"
+                "exec ~/.local/bin/rectangle-session agent-view {token} edit{display} {directory} {name}"
             ),
             token.to_owned(),
             repaint,

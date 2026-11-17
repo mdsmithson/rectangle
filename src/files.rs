@@ -72,6 +72,11 @@ struct Drag {
     name: String,
 }
 enum Prompt {
+    Create {
+        folder: bool,
+        name: String,
+        focus: bool,
+    },
     Rename(Entry, String),
     Delete(Entry),
 }
@@ -98,6 +103,7 @@ pub struct Explorer {
     descending: bool,
     listing: Option<Receiver<io::Result<String>>>,
     job: Option<Job>,
+    open_after_create: Option<FileEditor>,
     prompt: Option<Prompt>,
     status: Option<(bool, String)>,
     refresh: bool,
@@ -116,6 +122,7 @@ impl Default for Explorer {
             descending: false,
             listing: None,
             job: None,
+            open_after_create: None,
             prompt: None,
             status: None,
             refresh: true,
@@ -220,6 +227,7 @@ impl Explorer {
         pane: egui::Rect,
     ) -> (bool, Option<FileEditor>) {
         let mut activity = false;
+        let mut editor = None;
         if let Some(job) = &self.job {
             match job.result.try_recv() {
                 Err(TryRecvError::Empty) => {
@@ -229,6 +237,11 @@ impl Explorer {
                     let result = result.unwrap_or_else(|_| {
                         Err(io::Error::other("Operation stopped before confirmation."))
                     });
+                    if let Some(file) = self.open_after_create.take()
+                        && result.is_ok()
+                    {
+                        editor = Some(file);
+                    }
                     self.job = None;
                     self.status = Some(match result {
                         Ok(()) => (true, "Done.".into()),
@@ -267,6 +280,7 @@ impl Explorer {
         let enabled =
             interactive && self.listing.is_none() && self.job.is_none() && self.prompt.is_none();
         let mut action = None;
+        let writable = writable(&self.path);
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(enabled && !self.back.is_empty(), egui::Button::new("‹"))
@@ -329,9 +343,20 @@ impl Explorer {
                         }
                     });
             });
+            for (folder, label) in [(true, "New Folder"), (false, "New File")] {
+                if ui
+                    .add_enabled(enabled && writable, egui::Button::new(label))
+                    .clicked()
+                {
+                    action = Some(Action::Prompt(Prompt::Create {
+                        folder,
+                        name: String::new(),
+                        focus: true,
+                    }));
+                }
+            }
         });
         ui.label(RichText::new(&self.path).monospace());
-        let writable = writable(&self.path);
         if writable {
             ui.label(RichText::new("Drop local files in this pane to upload.").color(MUTED));
         }
@@ -342,48 +367,82 @@ impl Explorer {
         }
         if let Some(mut prompt) = self.prompt.take() {
             let mut keep = true;
-            ui.add_enabled_ui(interactive, |ui| {
-                ui.group(|ui| {
-                    match &mut prompt {
-                        Prompt::Rename(entry, new_name) => {
-                            ui.label(format!("Rename “{}”", entry.name));
-                            ui.text_edit_singleline(new_name);
-                            if ui
-                                .add_enabled(
-                                    valid_name(new_name) && *new_name != entry.name,
-                                    egui::Button::new("Rename"),
-                                )
-                                .clicked()
-                            {
-                                action = Some(Action::Work(Work::Rename {
-                                    directory: self.path.clone(),
-                                    name: entry.name.clone(),
-                                    to_directory: self.path.clone(),
-                                    to_name: new_name.clone(),
+            if let Prompt::Create {
+                folder,
+                name,
+                focus,
+            } = &mut prompt
+            {
+                let title = if *folder { "New Folder" } else { "New File" };
+                egui::Window::new(title).id(ui.id().with("create agent item"))
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .collapsible(false).resizable(false).enabled(interactive)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(if *folder { "Folder name" } else { "File name" });
+                        let response = ui.text_edit_singleline(name);
+                        if std::mem::take(focus) {
+                            response.request_focus();
+                        }
+                        let valid = portable_name(name);
+                        if !valid && !name.is_empty() {
+                            ui.colored_label(Color32::LIGHT_RED, "Use a Linux and Windows compatible name without reserved characters, spaces at the ends, or a trailing dot.");
+                        }
+                        let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(valid, egui::Button::new(if *folder { "Create folder" } else { "Create and edit" })).clicked() || (valid && enter) {
+                                action = Some(Action::Work(Work::Create {
+                                    directory: self.path.clone(), name: name.clone(), folder: *folder,
                                 }));
                                 keep = false;
                             }
-                        }
-                        Prompt::Delete(entry) => {
-                            ui.label(if entry.kind == 'd' {
-                                format!("Permanently delete “{}” and its contents?", entry.name)
-                            } else {
-                                format!("Permanently delete “{}”?", entry.name)
-                            });
-                            if ui.button("Yes, delete").clicked() {
-                                action = Some(Action::Work(Work::Delete {
-                                    directory: self.path.clone(),
-                                    name: entry.name.clone(),
-                                }));
-                                keep = false;
+                            if ui.button("Cancel").clicked() || ui.input(|input| input.key_pressed(egui::Key::Escape)) { keep = false; }
+                        });
+                    });
+            } else {
+                ui.add_enabled_ui(interactive, |ui| {
+                    ui.group(|ui| {
+                        match &mut prompt {
+                            Prompt::Create { .. } => unreachable!(),
+                            Prompt::Rename(entry, new_name) => {
+                                ui.label(format!("Rename “{}”", entry.name));
+                                ui.text_edit_singleline(new_name);
+                                if ui
+                                    .add_enabled(
+                                        valid_name(new_name) && *new_name != entry.name,
+                                        egui::Button::new("Rename"),
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(Action::Work(Work::Rename {
+                                        directory: self.path.clone(),
+                                        name: entry.name.clone(),
+                                        to_directory: self.path.clone(),
+                                        to_name: new_name.clone(),
+                                    }));
+                                    keep = false;
+                                }
+                            }
+                            Prompt::Delete(entry) => {
+                                ui.label(if entry.kind == 'd' {
+                                    format!("Permanently delete “{}” and its contents?", entry.name)
+                                } else {
+                                    format!("Permanently delete “{}”?", entry.name)
+                                });
+                                if ui.button("Yes, delete").clicked() {
+                                    action = Some(Action::Work(Work::Delete {
+                                        directory: self.path.clone(),
+                                        name: entry.name.clone(),
+                                    }));
+                                    keep = false;
+                                }
                             }
                         }
-                    }
-                    if ui.button("Cancel").clicked() {
-                        keep = false;
-                    }
-                })
-            });
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    })
+                });
+            }
             if keep {
                 self.prompt = Some(prompt);
             }
@@ -594,7 +653,6 @@ impl Explorer {
                 }
             }
         }
-        let mut editor = None;
         if let Some(action) = action {
             activity = true;
             let directory = self.path.clone();
@@ -629,6 +687,17 @@ impl Explorer {
                 }
             };
             if let Some(work) = work {
+                if let Work::Create {
+                    directory,
+                    name,
+                    folder: false,
+                } = &work
+                {
+                    self.open_after_create = Some(FileEditor {
+                        directory: directory.clone(),
+                        name: name.clone(),
+                    });
+                }
                 self.status = None;
                 self.job = Some(transfer::start(ui.ctx(), connection, token, work));
             }
@@ -664,6 +733,36 @@ fn writable(path: &str) -> bool {
 }
 fn valid_name(name: &str) -> bool {
     !matches!(name, "" | "." | "..") && name.len() <= 255 && !name.contains(['/', '\0'])
+}
+
+fn portable_name(name: &str) -> bool {
+    if !valid_name(name)
+        || name.trim().is_empty()
+        || name != name.trim()
+        || name.ends_with('.')
+        || name
+            .chars()
+            .any(|c| c.is_control() || "<>:\"\\|?*".contains(c))
+    {
+        return false;
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap()
+        .trim_end()
+        .to_ascii_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) && !["COM", "LPT"].iter().any(|p| {
+        stem.strip_prefix(p).is_some_and(|n| {
+            matches!(
+                n,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    })
 }
 fn join(path: &str, name: &str) -> String {
     format!("{}/{name}", path.trim_end_matches('/'))
@@ -744,6 +843,25 @@ fn parse_listing(data: &str) -> io::Result<(usize, Vec<Entry>)> {
         });
     }
     Ok((total, entries))
+}
+
+#[test]
+fn new_name_rejects_reserved_and_nonportable_names() {
+    for invalid in [
+        "",
+        "  ",
+        "folder/name",
+        "folder\\name",
+        "bad?",
+        "file.",
+        " aux.txt",
+        "com¹.log",
+        "LPT9",
+    ] {
+        assert!(!portable_name(invalid), "{invalid:?}");
+    }
+    assert!(portable_name("Project notes.md"));
+    assert!(portable_name(".gitignore"));
 }
 
 #[test]

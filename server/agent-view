@@ -6,12 +6,14 @@ case $mode in
     sh) display=100; title='SH Terminal'; program=/bin/sh ;;
     freebuff) display=101; title=Freebuff; program=/opt/rectangle/freebuff/freebuff ;;
     files) display=102; program= ;;
-    edit)
+    edit|edit10[3-9]|edit11[0-9]|edit12[0-7])
         command -v vim >/dev/null || { echo 'Vim is missing. Reopen the Agent with the updated image.' >&2; exit 1; }
-        display=103; title='SH Terminal · Vim'; program=python3 ;;
+        display=${mode#edit}; display=${display:-103}; title='SH Terminal · Vim'; program=python3 ;;
     *) exit 1 ;;
 esac
-lock="/tmp/rectangle-view-$mode"
+lock_name=$mode
+if [ "$display" = 103 ]; then lock_name=edit; fi
+lock="/tmp/rectangle-view-$lock_name"
 mkdir "$lock" || { echo 'This terminal view is already open.' >&2; exit 1; }
 xvnc= manager= terminal=
 cleanup() {
@@ -39,7 +41,7 @@ if [ -n "$program" ]; then
     openbox --config-file /tmp/agent-openbox.xml </dev/null >&2 &
     manager=$!
     cd "$HOME/workspace"
-    if [ "$mode" = edit ]; then
+    if [ "$program" = python3 ]; then
         set -- python3 -I -c "$2" edit "$3" "$4"
     else
         set -- "$program"

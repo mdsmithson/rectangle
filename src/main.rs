@@ -296,7 +296,11 @@ struct NewTab {
     slot: Option<Snap>,
     backend: Backend,
     image: usize,
+    name: String,
     port: String,
+    port_host: Option<Backend>,
+    port_lookup: Option<std::sync::mpsc::Receiver<std::io::Result<String>>>,
+    port_error: Option<String>,
     dockerfile: Option<String>,
     copy_name: String,
     error: Option<String>,
@@ -310,7 +314,8 @@ struct Tab {
     agent_port: Option<u16>,
     agent_view: AgentView,
     agent_owner: Option<u64>,
-    file_editor: bool,
+    agent_parent_title: Option<String>,
+    file_editor: Option<u16>,
     explorer: files::Explorer,
     resize_target: Option<(rfb::Resolution, Instant)>,
     resize_sent: Option<rfb::Resolution>,
@@ -1190,18 +1195,22 @@ impl Rectangle {
 
     fn open_file_editor(&mut self, ctx: &egui::Context, index: usize, editor: files::FileEditor) {
         let owner = &self.tabs[self.agent_owner_index(index)];
-        if self.tabs.iter().any(|tab| {
-            tab.agent_owner == Some(owner.id) && tab.file_editor && tab.session.is_some()
-        }) {
-            self.error =
-                Some("Close this Agent’s existing Vim tab before editing another file.".into());
-            return;
-        }
         if self.tabs.len() >= MAX_TABS {
             self.error = Some("Close a tab before opening Vim.".into());
             return;
         }
         let (Some(session), Some(port)) = (&owner.session, owner.agent_port) else {
+            return;
+        };
+        let Some(display) = (103..=127).find(|display| {
+            !self.tabs.iter().any(|tab| {
+                tab.agent_owner == Some(owner.id)
+                    && tab.file_editor == Some(*display)
+                    && tab.session.is_some()
+            })
+        }) else {
+            self.error =
+                Some("Close a Vim tab before opening another editor for this Agent.".into());
             return;
         };
         let repaint = ctx.clone();
@@ -1210,6 +1219,7 @@ impl Rectangle {
             owner.connection.key.as_deref(),
             &session.token,
             &editor,
+            display,
             move || repaint.request_repaint(),
         ) {
             Ok(session) => {
@@ -1223,7 +1233,8 @@ impl Rectangle {
                     agent_port: Some(port),
                     agent_view: AgentView::Shell,
                     agent_owner: Some(owner.id),
-                    file_editor: true,
+                    agent_parent_title: Some(owner.title.clone()),
+                    file_editor: Some(display),
                     always_on: owner.always_on,
                     session: Some(session),
                     started: Some(Instant::now()),
@@ -1241,7 +1252,7 @@ impl Rectangle {
         if let Some(existing) = self.tabs.iter().position(|tab| {
             (tab.id == owner_id || tab.agent_owner == Some(owner_id))
                 && tab.agent_view == kind
-                && !tab.file_editor
+                && tab.file_editor.is_none()
                 && tab.session.is_some()
         }) {
             self.select_tab(existing);
@@ -1273,6 +1284,7 @@ impl Rectangle {
                     agent_port: Some(port),
                     agent_view: kind,
                     agent_owner: Some(owner_id),
+                    agent_parent_title: Some(owner.title.clone()),
                     always_on: owner.always_on,
                     session: Some(session),
                     started: Some(Instant::now()),
@@ -1706,20 +1718,16 @@ impl Rectangle {
         let slot = draft.slot;
         if draft.image == 0 {
             self.open_tab(ctx, draft.backend, None, None);
-        } else if let Ok(port) = draft.port.trim().parse::<u16>()
+        } else if let Some(name) = saved::title(&draft.name)
+            && let Ok(port) = draft.port.trim().parse::<u16>()
             && port >= 1024
         {
             if draft.image <= 2 {
-                let name = if draft.image == 2 {
-                    "File Manager"
-                } else {
-                    "Agent"
-                };
                 self.launch_agent(ctx, draft.backend, "demo", name, port, draft.image == 2);
             } else if let Some(image) = self.agent_images.get(draft.image - 3).cloned() {
                 self.request_with_input(
                     ctx,
-                    Job::BuildAgent(draft.backend, image.id.clone(), image.name, port, slot),
+                    Job::BuildAgent(draft.backend, image.id.clone(), name.to_owned(), port, slot),
                     draft.backend,
                     &format!("agent-build {}", image.id),
                     Some(image.dockerfile.into_bytes()),
@@ -1727,11 +1735,73 @@ impl Rectangle {
             }
         } else {
             self.dialog = Some(Dialog::NewTab(NewTab {
-                error: Some("Choose a TCP port from 1024 to 65535.".into()),
+                error: Some("Enter a tab name and a TCP port from 1024 to 65535.".into()),
                 ..draft
             }));
         }
         self.place_new_tab(count, slot);
+    }
+
+    fn suggest_agent_port(&self, ctx: &egui::Context, draft: &mut NewTab) {
+        if draft.port_host != Some(draft.backend) {
+            draft.port_host = Some(draft.backend);
+            draft.port_error = None;
+            draft.port_lookup = None;
+            let connection = self.connection(draft.backend);
+            if connection.host.trim().is_empty() {
+                draft.port_error =
+                    Some("Configure SSH for this server to find a free port.".into());
+                return;
+            }
+            let repaint = ctx.clone();
+            match saved::run(
+                connection.host.trim(),
+                connection.key.as_deref(),
+                "agent-next-port",
+                move || repaint.request_repaint(),
+            ) {
+                Ok(job) => draft.port_lookup = Some(job),
+                Err(error) => draft.port_error = Some(error.to_string()),
+            }
+        }
+        if let Some(job) = &draft.port_lookup {
+            match job.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                response => {
+                    draft.port_lookup = None;
+                    match response {
+                        Ok(Ok(response)) => {
+                            if let Some(port) = response
+                                .trim()
+                                .strip_prefix("RECTAGENTPORT1 ")
+                                .and_then(|port| port.parse::<u16>().ok())
+                                .filter(|p| *p >= 4000)
+                            {
+                                if draft.port.trim().is_empty() {
+                                    draft.port = port.to_string();
+                                }
+                            } else {
+                                draft.port_error =
+                                    Some("The server did not return a free port.".into());
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            draft.port_error = Some(
+                                if error
+                                    .to_string()
+                                    .contains("Invalid Rectangle display resolution.")
+                                {
+                                    "Update this server to enable port suggestions, or enter a port manually.".into()
+                                } else {
+                                    error.to_string()
+                                },
+                            )
+                        }
+                        Err(_) => draft.port_error = Some("The port lookup disconnected.".into()),
+                    }
+                }
+            }
+        }
     }
 
     fn show_new_tab(&mut self, ctx: &egui::Context, draft: &mut NewTab) -> u8 {
@@ -1747,7 +1817,10 @@ impl Rectangle {
                         let label = if self.connection(backend).host.is_empty() {
                             format!("{} (not configured)", backend.name(""))
                         } else { backend.name(&self.host).to_owned() };
-                        ui.selectable_value(&mut draft.backend, backend, label);
+                        if ui.selectable_value(&mut draft.backend, backend, label).changed() {
+                            draft.port.clear();
+                            draft.port_host = None;
+                        }
                     }
                 });
                 let names: Vec<_> = ["Browser", "Agent", "File Manager"].into_iter().chain(self.agent_images.iter().map(|image| image.name.as_str())).collect();
@@ -1773,11 +1846,23 @@ impl Rectangle {
                     }
                 });
                 if draft.image != 0 {
+                    self.suggest_agent_port(ctx, draft);
                     ui.label(if draft.image == 2 { "Agent workspace in a file explorer" } else { "Alpine terminal with Node.js and Freebuff" });
                     ui.horizontal(|ui| {
-                        ui.label("TCP port on host");
-                        ui.add(egui::TextEdit::singleline(&mut draft.port).desired_width(90.0).hint_text("3000"));
+                        ui.label("Tab name");
+                        ui.add(egui::TextEdit::singleline(&mut draft.name).hint_text("Required"));
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("TCP port on host");
+                        ui.add(egui::TextEdit::singleline(&mut draft.port).desired_width(90.0).hint_text("Automatic"));
+                        if draft.port_lookup.is_some() { ui.spinner(); }
+                        if ui.add_enabled(draft.port_lookup.is_none(), egui::Button::new("Find free port")).clicked() {
+                            draft.port.clear();
+                            draft.port_host = None;
+                            ctx.request_repaint();
+                        }
+                    });
+                    if let Some(error) = &draft.port_error { ui.label(RichText::new(error).color(Color32::LIGHT_RED)); }
                     ui.label(RichText::new("Check Open ports for the host binding. Agent bypasses the browser VPN.").small().color(MUTED));
                 }
                 if let Some(file) = &mut draft.dockerfile {
@@ -1797,10 +1882,11 @@ impl Rectangle {
                 if let Some(err) = &draft.error { ui.label(RichText::new(err).color(Color32::LIGHT_RED)); }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    let name = if draft.image > 1 { "Build and open" } else { "Open tab" };
+                    let name = if draft.image > 2 { "Build and open" } else { "Open tab" };
                     let source = match draft.image { 0 => images::BROWSER, 1 | 2 => images::AGENT, index => &self.agent_images[index - 3].dockerfile };
                     let edits_saved = draft.dockerfile.as_ref().is_none_or(|draft| draft == source);
-                    if ui.add_enabled(self.job.is_none() && edits_saved && self.tabs.len() < MAX_TABS, egui::Button::new(name))
+                    let valid_agent = draft.image == 0 || (saved::title(&draft.name).is_some() && draft.port.trim().parse::<u16>().is_ok_and(|port| port >= 1024));
+                    if ui.add_enabled(self.job.is_none() && edits_saved && valid_agent && self.tabs.len() < MAX_TABS, egui::Button::new(name))
                         .on_disabled_hover_text("Save Dockerfile changes as a new image before opening.").clicked() { choice = 1; }
                     if ui.button("Cancel").clicked() { choice = 3; }
                 });
@@ -2189,8 +2275,12 @@ impl Rectangle {
                 }
             }
             (1, Dialog::Rename(id, name)) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
-                    tab.title = name.trim().into();
+                for tab in &mut self.tabs {
+                    if tab.id == id {
+                        tab.title = name.trim().into();
+                    } else if tab.agent_owner == Some(id) {
+                        tab.agent_parent_title = Some(name.trim().into());
+                    }
                 }
             }
             (1 | 2, Dialog::Close(id, name)) => {
@@ -3242,12 +3332,15 @@ impl Rectangle {
         ready: bool,
         dragging_tab: &mut Option<u64>,
     ) -> (Option<TabAction>, Option<(u64, Pos2)>, Rect) {
-        let label = format!(
-            "{} \u{b7} {}{}",
-            tab.backend.name(&tab.connection.host),
-            tab.title,
-            if tab.muted { " (muted)" } else { "" }
-        );
+        let host = tab.backend.name(&tab.connection.host);
+        let mut label = if let Some(parent) = &tab.agent_parent_title {
+            format!("{host} - {parent} - {}", tab.title)
+        } else {
+            format!("{host} · {}", tab.title)
+        };
+        if tab.muted {
+            label.push_str(" (muted)");
+        }
         let font = egui::TextStyle::Button.resolve(ui.style());
         let text = ui
             .painter()
@@ -3718,17 +3811,16 @@ impl Rectangle {
         {
             let repaint = ctx.clone();
             let view = tab.agent_owner.map(|_| {
-                if tab.file_editor {
-                    "edit"
-                } else {
-                    tab.agent_view.command()
-                }
+                tab.file_editor.map_or_else(
+                    || tab.agent_view.command().to_owned(),
+                    |display| format!("edit{display}"),
+                )
             });
             match clipboard::Clipboard::start_view(
                 tab.connection.host.trim(),
                 tab.connection.key.as_deref(),
                 &session.token,
-                view,
+                view.as_deref(),
                 move || repaint.request_repaint(),
             ) {
                 Ok(clipboard) => tab.clipboard = Some(clipboard),

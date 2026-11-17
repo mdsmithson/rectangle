@@ -67,3 +67,18 @@ class AgentFilesTests(unittest.TestCase):
 
     def test_editor_view_shell_syntax(self):
         subprocess.run(["sh", "-n", str(HELPER.with_name("agent-view"))], check=True, timeout=10)
+
+    def test_create_validates_portability_and_never_overwrites(self):
+        for bad in ("", "   ", "..", "NUL.txt", "com¹.log", "parent/child", "a\\b", "bad.", "question?"):
+            with self.subTest(name=bad):
+                result = self.call("mkdir", self.home, bad.encode().hex())
+                self.assertNotEqual(result.returncode, 0)
+        folder = "Project files"
+        self.assertEqual(self.call("mkdir", self.home, folder.encode().hex()).stdout, b"OK\n")
+        filename = "notes.md"
+        target = self.home / folder
+        self.assertEqual(self.call("new-file", target, filename.encode().hex()).stdout, b"OK\n")
+        (target / filename).write_text("keep this")
+        duplicate = self.call("new-file", target, filename.encode().hex())
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertEqual((target / filename).read_text(), "keep this")
