@@ -127,6 +127,22 @@ python -m unittest discover -s server
 
 The default tests do not connect to a server. Ignored integration tests require your own test host and key; see the `RECTANGLE_SMOKE_*` variables in the test source. Existing running containers retain their old image. The server owner can still run `sh server/install.sh --keep-egress` for manual upgrades.
 
+## Read-only Windows shares
+
+Rectangle 0.1.13 can share a folder from a saved Agent through one Samba service per host. The host needs Docker Engine and CLI 26 or newer for `volume-subpath`, and an unused TCP port 445 on its LAN address. Enable the feature once from a regular SSH terminal as the Rectangle server owner:
+
+```sh
+python3 -I ~/.config/rectangle/current-release/smb.py setup <LAN-IP> <LAN-CIDR>
+```
+
+Enter a separate SMB password at the hidden prompts. The command needs the private IPv4 address and local subnet, for example `192.168.1.20 192.168.1.0/24`. Do not forward TCP 445 from the internet. SMB uses the username `rectangle`.
+
+1. Save and close the Agent once, then reopen it from Home.
+2. In File Manager, right-click a folder such as Music and check **Share over SMB**. Pick a unique name for the server. The files stay available even when the Agent is closed.
+3. Right-click again and choose **Copy Windows path**. Map it to a drive in Windows using the SMB username and password, then add that drive in Winamp.
+
+Sharing is read-only at both the SMB and Docker mount levels, requires authentication, and serves only the selected volume subfolder. Changing shares can briefly disconnect other SMB clients. Turn off a share before moving or deleting its folder or deleting the saved Agent. The server owner can remove a share without reopening the Agent: `python3 -I ~/.config/rectangle/current-release/smb.py remove <share-name>`.
+
 The Windows icon and loading animation are generated from the square spiral in `src/mark.rs`. Firefox and the other software used in containers are downloaded during image builds.
 
 See [SECURITY.md](SECURITY.md) for the trust model and [NOTICE](NOTICE) for third-party attribution. Rectangle source is available under [Apache License 2.0](LICENSE).

@@ -24,6 +24,7 @@ IMAGES = {
     "egress": ("Dockerfile.egress", "egress.py"),
     "vpn": ("Dockerfile.vpn", "egress.py", "vpn.py"),
     "proton": ("Dockerfile.proton", "egress.py", "proton.py"),
+    "smb": ("Dockerfile.smb",),
 }
 VERSION = re.compile(r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})")
 SHA = re.compile(r"[a-f0-9]{40}")
@@ -79,6 +80,8 @@ def image_tag(server, name, inputs):
 def stage_images(server):
     result = {}
     for name, inputs in IMAGES.items():
+        if name == "smb" and not (ROOT / "smb/settings.json").is_file():
+            continue
         tag = image_tag(server, name, inputs)
         exists = subprocess.run(("docker", "image", "inspect", tag), stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, timeout=15).returncode == 0
@@ -108,7 +111,7 @@ def activate(source, commit, expected):
     try:
         for filename in ("rectangle-session", "rectangle-proton", "release-launcher"):
             copy(server / filename, release / filename, 0o700)
-        for filename in ("release.py", "server-update.py", "agent-view", "agent-files.py", "session-seccomp.json"):
+        for filename in ("release.py", "server-update.py", "agent-view", "agent-files.py", "session-seccomp.json", "smb.py", "Dockerfile.smb"):
             copy(server / filename, release / filename, 0o600)
         context = release / "agent-context"
         context.mkdir(mode=0o700)

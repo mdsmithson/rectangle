@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+mod smb;
 mod transfer;
 use transfer::{Job, Work};
 const PAGE: usize = 150;
@@ -107,6 +108,7 @@ pub struct Explorer {
     prompt: Option<Prompt>,
     status: Option<(bool, String)>,
     refresh: bool,
+    shares: smb::Shares,
 }
 
 impl Default for Explorer {
@@ -126,6 +128,7 @@ impl Default for Explorer {
             prompt: None,
             status: None,
             refresh: true,
+            shares: smb::Shares::default(),
         }
     }
 }
@@ -222,10 +225,12 @@ impl Explorer {
         ui: &mut egui::Ui,
         connection: &Connection,
         token: &str,
+        agent_name: &str,
         interactive: bool,
         accepts_drop: bool,
         pane: egui::Rect,
     ) -> (bool, Option<FileEditor>) {
+        self.shares.tick(ui.ctx(), connection, token);
         let mut activity = false;
         let mut editor = None;
         if let Some(job) = &self.job {
@@ -314,6 +319,7 @@ impl Explorer {
                 .add_enabled(enabled, egui::Button::new("Refresh"))
                 .clicked()
             {
+                self.shares.refresh();
                 self.refresh = true;
                 self.status = None;
                 activity = true;
@@ -365,6 +371,7 @@ impl Explorer {
         } else if let Some((ok, message)) = &self.status {
             ui.colored_label(if *ok { MUTED } else { Color32::LIGHT_RED }, message);
         }
+        self.shares.dialog(ui, connection, token, interactive);
         if let Some(mut prompt) = self.prompt.take() {
             let mut keep = true;
             if let Prompt::Create {
@@ -532,6 +539,15 @@ impl Explorer {
                     }
                     if enabled {
                         response.context_menu(|ui| {
+                            if writable && entry.kind == 'd' {
+                                self.shares.context_menu(
+                                    ui,
+                                    &join(path, &entry.name),
+                                    &entry.name,
+                                    agent_name,
+                                );
+                                ui.separator();
+                            }
                             if ui.button("Copy full path").clicked() {
                                 ui.ctx().copy_text(address(
                                     connection.host.trim(),

@@ -364,6 +364,7 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
         metadata_lock
         check_live "$running" "$id" || { echo 'This tab is no longer running.' >&2; exit 1; }
         if [ "$operation" = discard ]; then
+            if [ -f "$assets/smb.py" ]; then python3 -I "$assets/smb.py" protect "$id"; fi
             rm -f -- "$saved/$id" "$agent_memory/$id"
         else
             case $title in ''|*[!0-9a-f]*) bad_resolution ;; esac
@@ -440,6 +441,7 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
             { echo 'Stop the parked session before deleting its saved profile.' >&2; exit 1; }
         metadata_lock
         if [ -f "$saved/$id" ]; then
+            if [ -f "$assets/smb.py" ]; then python3 -I "$assets/smb.py" protect "$id"; fi
             docker volume rm "rectangle-profile-$id" >/dev/null
             rm -f -- "$saved/$id" "$agent_memory/$id"
         fi
@@ -447,6 +449,27 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
         exit ;;
 esac
 case $requested in
+    'agent-smb '*)
+        fields=${requested#* }; token=${fields%% *}
+        valid_token "$token" || bad_resolution
+        IFS=' ' read -r verb folder share extra <<EOF
+${fields#* }
+EOF
+        [ -f "$assets/smb.py" ] && [ -z "$extra" ] || exit 1
+        case $verb in
+            list)
+                [ -z "$folder$share" ] || exit 1
+                exec python3 -I "$assets/smb.py" agent "$token" list ;;
+            enable)
+                [ -n "$folder" ] && [ -n "$share" ] || exit 1
+                metadata_lock
+                exec python3 -I "$assets/smb.py" agent "$token" enable "$folder" "$share" ;;
+            disable)
+                [ -n "$folder" ] && [ -z "$share" ] || exit 1
+                metadata_lock
+                exec python3 -I "$assets/smb.py" agent "$token" disable "$folder" ;;
+            *) exit 1 ;;
+        esac ;;
     'agent-view '*|'agent-files '*|'agent-upload '*|'agent-file '*|'agent-clipboard '*)
         operation=${requested%% *}
         fields=${requested#* }
@@ -487,6 +510,15 @@ EOF
                 [ -z "$size$extra" ] || exit 1
                 exec docker exec -i "$name" python3 -I -c "$(cat "$assets/agent-files.py")" upload "$action" "$path" "$file" ;;
             agent-file)
+                case $action in
+                    delete|rename)
+                        if [ -f "$assets/smb.py" ]; then
+                            metadata_lock
+                            profile=$(docker inspect -f '{{index .Config.Labels "rectangle.profile"}}' "$name")
+                            valid_token "$profile" || exit 1
+                            python3 -I "$assets/smb.py" protect "$profile" "$path" "$file"
+                        fi ;;
+                esac
                 case $action in
                     download|delete|mkdir|new-file)
                         [ -n "$file" ] && [ -z "$size$extra" ] || exit 1

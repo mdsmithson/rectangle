@@ -3009,6 +3009,7 @@ impl Rectangle {
                             ui,
                             &tab.connection,
                             &session.token,
+                            tab.agent_parent_title.as_deref().unwrap_or(&tab.title),
                             !block_input,
                             target,
                             pane,

@@ -1,0 +1,8 @@
+FROM alpine:3.24
+RUN apk add --no-cache samba-server samba-common-tools \
+    && addgroup -g 10001 rectangle \
+    && adduser -D -H -u 10001 -G rectangle rectangle \
+    && mkdir -p /shares /state/private /run/samba \
+    && chmod 0700 /state/private \
+    && for i in $(seq 0 31); do mkdir "/shares/$i"; done
+ENTRYPOINT ["/usr/sbin/smbd", "--foreground", "--no-process-group", "--configfile=/config/smb.conf"]

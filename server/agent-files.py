@@ -229,6 +229,9 @@ if __name__ == "__main__":
             raise ValueError("Expected an absolute container path.")
         if operation == "list":
             listing(path, int(arguments[0]), arguments[1:] == ["desc"])
+        elif operation == "validate-share":
+            with directory_fd(path):
+                pass
         elif operation == "upload":
             upload(path, decode(arguments[0]), int(arguments[1]))
         elif operation in ("download", "delete", "edit"):
