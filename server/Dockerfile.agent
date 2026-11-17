@@ -14,7 +14,7 @@ RUN apk add --no-cache nodejs npm gcompat libstdc++ bash git ripgrep ca-certific
     && rm -rf /root/.config/manicode \
     && npm cache clean --force
 COPY --chmod=0555 agent-entrypoint /opt/rectangle/agent-entrypoint
-COPY clipboard-stream.py memory-stream.py /opt/rectangle/
+COPY --chmod=0444 clipboard-stream.py memory-stream.py /opt/rectangle/
 ENV HOME=/tmp/home DISPLAY=:99 LANG=C.UTF-8 TERM=xterm-256color
 USER 10001:10001
 ENTRYPOINT ["/opt/rectangle/agent-entrypoint"]

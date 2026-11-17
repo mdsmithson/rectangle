@@ -102,3 +102,11 @@ class ServerUpdateTests(unittest.TestCase):
         (self.root / "Dockerfile.agent").write_text("after")
         after = tags()
         self.assertEqual([key for key in before if before[key] != after[key]], ["agent"])
+
+    def test_images_set_permissions_independently_of_private_checkout(self):
+        server = Path(__file__).resolve().parent
+        for recipe, *_ in release.IMAGES.values():
+            for line in (server / recipe).read_text().splitlines():
+                if line.startswith("COPY "):
+                    self.assertRegex(line, r"^COPY --chmod=0[45][45][45] ",
+                                     f"{recipe} inherits permissions from the private source checkout")
