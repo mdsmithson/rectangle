@@ -12,11 +12,13 @@ pub struct Entry {
     pub title: String,
     pub startup_page: String,
     pub agent_port: Option<u16>,
+    pub file_manager: bool,
 }
 
 #[derive(Clone)]
 pub struct Parked {
     pub agent_port: Option<u16>,
+    pub file_manager: bool,
     pub always_on: bool,
     pub snap: Option<crate::tiling::Snap>,
     pub token: String,
@@ -43,7 +45,8 @@ pub fn parse_parked(output: &str) -> io::Result<Vec<Parked>> {
             title(&name)?;
             Some(Parked {
                 agent_port: layout.get(1).and_then(|port| port.parse().ok()),
-                always_on: layout.get(2) == Some(&"always-on"),
+                always_on: layout.iter().skip(2).any(|item| *item == "always-on"),
+                file_manager: layout.iter().skip(2).any(|item| *item == "files"),
                 snap: layout
                     .first()
                     .and_then(|slot| crate::tiling::Snap::parse(slot)),
@@ -86,7 +89,7 @@ pub fn encode(title: &str) -> String {
     title.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
-fn decode(encoded: &str, max_len: usize) -> Option<String> {
+pub(crate) fn decode(encoded: &str, max_len: usize) -> Option<String> {
     if encoded.len() > max_len || encoded.len() % 2 != 0 || !encoded.is_ascii() {
         return None;
     }
@@ -114,7 +117,9 @@ pub fn parse(output: &str) -> io::Result<Vec<Entry>> {
             let (name, page) = data.split_once(' ').unwrap_or((data, ""));
             let name = decode(name, 160)?;
             title(&name)?;
+            let file_manager = page.starts_with("agent:") && page.ends_with(":files");
             let agent_port = if let Some(agent) = page.strip_prefix("agent:") {
+                let agent = agent.strip_suffix(":files").unwrap_or(agent);
                 let (image, port) = agent.split_once(':')?;
                 if image != "demo" && !valid_id(image) {
                     return None;
@@ -128,6 +133,7 @@ pub fn parse(output: &str) -> io::Result<Vec<Entry>> {
                 title: name,
                 startup_page: decode(page, 4096).unwrap_or_default(),
                 agent_port,
+                file_manager,
             })
         })();
         if let Some(item) = item {

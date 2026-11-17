@@ -3,6 +3,7 @@
 mod audio;
 mod clipboard;
 mod design;
+mod files;
 mod images;
 mod mark;
 mod memory;
@@ -47,6 +48,7 @@ struct Rectangle {
     address_headers: Vec<(u64, Rect)>,
     proton: proton::Proton,
     primary_memory: memory::HostMeter,
+    primary_disk: memory::HostMeter,
     marble: Option<egui::TextureHandle>,
     host: String,
     identity: Option<std::path::PathBuf>,
@@ -121,8 +123,37 @@ enum TabAction {
     AgentResolution(AgentResolution),
     ToggleAlwaysOn,
     AgentMemory,
+    OpenAgentView(AgentView),
     Preview,
     Info(AgentInfo),
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum AgentView {
+    #[default]
+    Freebuff,
+    Files,
+    Shell,
+}
+
+impl AgentView {
+    const ALL: [Self; 3] = [Self::Files, Self::Shell, Self::Freebuff];
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::Freebuff => "freebuff",
+            Self::Files => "files",
+            Self::Shell => "sh",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Freebuff => "Freebuff Terminal",
+            Self::Files => "File Manager",
+            Self::Shell => "SH Terminal",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -277,6 +308,9 @@ struct Tab {
     page_rect: Option<Rect>,
     preview: Option<preview::Preview>,
     agent_port: Option<u16>,
+    agent_view: AgentView,
+    agent_owner: Option<u64>,
+    explorer: files::Explorer,
     resize_target: Option<(rfb::Resolution, Instant)>,
     resize_sent: Option<rfb::Resolution>,
     snap: Option<Snap>,
@@ -894,6 +928,11 @@ impl Rectangle {
                     volume,
                     profile: entry.profile,
                     agent_port: entry.agent_port,
+                    agent_view: if entry.file_manager {
+                        AgentView::Files
+                    } else {
+                        AgentView::Freebuff
+                    },
                     always_on: entry.always_on,
                     snap: entry.snap.filter(|slot| {
                         !self
@@ -916,9 +955,32 @@ impl Rectangle {
 
     fn expire_idle_tabs(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
+        let linked_activity: Vec<_> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                tab.agent_owner.map(|owner| {
+                    (
+                        owner,
+                        if tab.explorer.uploading() {
+                            Some(now)
+                        } else {
+                            tab.last_input
+                        },
+                    )
+                })
+            })
+            .collect();
+        for (owner, input) in linked_activity {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == owner) {
+                tab.last_input = tab.last_input.max(input);
+            }
+        }
         let mut save = None;
         for tab in &mut self.tabs {
             if tab.always_on
+                || tab.agent_owner.is_some()
+                || tab.explorer.uploading()
                 || matches!(&self.dialog, Some(Dialog::Close(id, _)) if *id == tab.id)
                 || matches!(&self.job, Some((Job::AlwaysOn(id, _), _)) if *id == tab.id)
             {
@@ -1030,16 +1092,21 @@ impl Rectangle {
         }
         let repaint = ctx.clone();
         let pixels_per_point = ctx.pixels_per_point();
-        let size = ctx
+        let mut size = ctx
             .input(|input| input.viewport().monitor_size)
             .map(|points| {
                 rfb::Resolution::fit(points.x * pixels_per_point, points.y * pixels_per_point)
             })
             .unwrap_or(rfb::Resolution::FALLBACK);
         let agent_port = match &address {
-            Some(session::StartPage::Agent(_, port)) => Some(*port),
+            Some(session::StartPage::Agent(_, port, _)) => Some(*port),
             _ => entry.as_ref().and_then(|entry| entry.agent_port),
         };
+        let file_manager = matches!(&address, Some(session::StartPage::Agent(_, _, true)))
+            || entry.as_ref().is_some_and(|entry| entry.file_manager);
+        if file_manager {
+            size = rfb::Resolution::FALLBACK;
+        }
         let start = if agent_port.is_some() && entry.is_some() {
             session::StartPage::Url("")
         } else {
@@ -1076,6 +1143,11 @@ impl Rectangle {
                     volume,
                     backend,
                     agent_port,
+                    agent_view: if file_manager {
+                        AgentView::Files
+                    } else {
+                        AgentView::Freebuff
+                    },
                     connection,
                     profile: entry.map(|entry| entry.id),
                     session: Some(session),
@@ -1092,11 +1164,76 @@ impl Rectangle {
     }
 
     fn close_tab(&mut self, index: usize) {
-        self.tabs.remove(index);
-        if index < self.active || self.active >= self.tabs.len() {
-            self.active = self.active.saturating_sub(1);
-        }
+        let closed = self.tabs[index].id;
+        let active = self.tabs.get(self.active).map(|tab| tab.id);
+        self.tabs
+            .retain(|tab| tab.id != closed && tab.agent_owner != Some(closed));
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| Some(tab.id) == active)
+            .unwrap_or_else(|| {
+                index
+                    .saturating_sub(1)
+                    .min(self.tabs.len().saturating_sub(1))
+            });
         self.home |= self.tabs.is_empty();
+    }
+
+    fn agent_owner_index(&self, index: usize) -> usize {
+        self.tabs[index]
+            .agent_owner
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .unwrap_or(index)
+    }
+
+    fn open_agent_view(&mut self, ctx: &egui::Context, index: usize, kind: AgentView) {
+        let owner = &self.tabs[self.agent_owner_index(index)];
+        let owner_id = owner.id;
+        if let Some(existing) = self.tabs.iter().position(|tab| {
+            (tab.id == owner_id || tab.agent_owner == Some(owner_id))
+                && tab.agent_view == kind
+                && tab.session.is_some()
+        }) {
+            self.select_tab(existing);
+            return;
+        }
+        if self.tabs.len() >= MAX_TABS {
+            self.error = Some("Close a tab before opening another view.".into());
+            return;
+        }
+        let (Some(session), Some(port)) = (&owner.session, owner.agent_port) else {
+            return;
+        };
+        let connection = owner.connection.clone();
+        let repaint = ctx.clone();
+        match Session::agent_view(
+            connection.host.trim(),
+            connection.key.as_deref(),
+            &session.token,
+            kind,
+            move || repaint.request_repaint(),
+        ) {
+            Ok(session) => {
+                self.next_id += 1;
+                self.tabs.push(Tab {
+                    id: self.next_id,
+                    backend: owner.backend,
+                    connection,
+                    title: kind.label().into(),
+                    agent_port: Some(port),
+                    agent_view: kind,
+                    agent_owner: Some(owner_id),
+                    always_on: owner.always_on,
+                    session: Some(session),
+                    started: Some(Instant::now()),
+                    ..Default::default()
+                });
+                self.select_tab(self.tabs.len() - 1);
+                ctx.request_repaint();
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
     }
 
     fn select_tab(&mut self, index: usize) {
@@ -1251,7 +1388,7 @@ impl Rectangle {
             Job::BuildAgent(backend, image, name, port, slot) => result.map(|_| {
                 if !self.quitting {
                     let count = self.tabs.len();
-                    self.launch_agent(ctx, backend, &image, &name, port);
+                    self.launch_agent(ctx, backend, &image, &name, port, false);
                     self.place_new_tab(count, slot);
                 }
             }),
@@ -1366,7 +1503,11 @@ impl Rectangle {
                         "The server did not confirm Always on.",
                     ));
                 }
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                for tab in self
+                    .tabs
+                    .iter_mut()
+                    .filter(|tab| tab.id == id || tab.agent_owner == Some(id))
+                {
                     tab.always_on = enabled;
                     tab.last_input = Some(Instant::now());
                 }
@@ -1408,6 +1549,7 @@ impl Rectangle {
     }
 
     fn park_tab(&mut self, ctx: &egui::Context, index: usize) {
+        let index = self.agent_owner_index(index);
         if self.job.is_none()
             && let Some(tab) = self.tabs.get_mut(index)
             && let Some(session) = &tab.session
@@ -1431,6 +1573,10 @@ impl Rectangle {
         // A stopped tab has no browser to park. Process the rest one at a time.
         while let Some(index) = self.tabs.len().checked_sub(1) {
             let tab = &mut self.tabs[index];
+            if tab.agent_owner.is_some() {
+                self.close_tab(index);
+                continue;
+            }
             tab.poll(ctx);
             if tab.session.is_none() {
                 self.close_tab(index);
@@ -1452,6 +1598,14 @@ impl Rectangle {
     }
 
     fn ask_close(&mut self, ctx: &egui::Context, index: usize) {
+        if self
+            .tabs
+            .get(index)
+            .is_some_and(|tab| tab.agent_owner.is_some())
+        {
+            self.close_tab(index);
+            return;
+        }
         if self.job.is_none()
             && self.dialog.is_none()
             && let Some(tab) = self.tabs.get_mut(index)
@@ -1484,13 +1638,14 @@ impl Rectangle {
         id: &str,
         name: &str,
         port: u16,
+        file_manager: bool,
     ) {
         let count = self.tabs.len();
         self.open_tab(
             ctx,
             backend,
             None,
-            Some(session::StartPage::Agent(id, port)),
+            Some(session::StartPage::Agent(id, port, file_manager)),
         );
         if self.tabs.len() > count {
             self.tabs.last_mut().unwrap().title = name.into();
@@ -1505,9 +1660,14 @@ impl Rectangle {
         } else if let Ok(port) = draft.port.trim().parse::<u16>()
             && port >= 1024
         {
-            if draft.image == 1 {
-                self.launch_agent(ctx, draft.backend, "demo", "Agent", port);
-            } else if let Some(image) = self.agent_images.get(draft.image - 2).cloned() {
+            if draft.image <= 2 {
+                let name = if draft.image == 2 {
+                    "File Manager"
+                } else {
+                    "Agent"
+                };
+                self.launch_agent(ctx, draft.backend, "demo", name, port, draft.image == 2);
+            } else if let Some(image) = self.agent_images.get(draft.image - 3).cloned() {
                 self.request_with_input(
                     ctx,
                     Job::BuildAgent(draft.backend, image.id.clone(), image.name, port, slot),
@@ -1541,7 +1701,7 @@ impl Rectangle {
                         ui.selectable_value(&mut draft.backend, backend, label);
                     }
                 });
-                let names: Vec<_> = ["Browser", "Agent"].into_iter().chain(self.agent_images.iter().map(|image| image.name.as_str())).collect();
+                let names: Vec<_> = ["Browser", "Agent", "File Manager"].into_iter().chain(self.agent_images.iter().map(|image| image.name.as_str())).collect();
                 ui.horizontal(|ui| {
                     ui.label("Image");
                     egui::ComboBox::from_id_salt("new-tab-image")
@@ -1558,13 +1718,13 @@ impl Rectangle {
                     if ui.button(if draft.image == 0 { "View Dockerfile" } else { "Edit Dockerfile" }).clicked() {
                         draft.dockerfile = Some(match draft.image {
                             0 => images::BROWSER.to_owned(),
-                            1 => images::AGENT.to_owned(),
-                            index => self.agent_images[index - 2].dockerfile.clone(),
+                            1 | 2 => images::AGENT.to_owned(),
+                            index => self.agent_images[index - 3].dockerfile.clone(),
                         });
                     }
                 });
                 if draft.image != 0 {
-                    ui.label("Alpine terminal with Node.js and Freebuff");
+                    ui.label(if draft.image == 2 { "Agent workspace in a file explorer" } else { "Alpine terminal with Node.js and Freebuff" });
                     ui.horizontal(|ui| {
                         ui.label("TCP port on host");
                         ui.add(egui::TextEdit::singleline(&mut draft.port).desired_width(90.0).hint_text("3000"));
@@ -1732,6 +1892,7 @@ impl Rectangle {
                         if primary_changed {
                             self.proton = proton::Proton::default();
                             self.primary_memory = memory::HostMeter::default();
+                            self.primary_disk = memory::HostMeter::default();
                             self.entries.clear();
                         }
                         if secondary_changed {
@@ -1776,7 +1937,7 @@ impl Rectangle {
                     match result {
                         Ok(image) => {
                             self.agent_images.push(image);
-                            draft.image = self.agent_images.len() + 1;
+                            draft.image = self.agent_images.len() + 2;
                             draft.dockerfile = None;
                             draft.copy_name.clear();
                             draft.error = None;
@@ -2213,8 +2374,18 @@ impl Rectangle {
         let ctx = ui.ctx().clone();
         self.proton
             .tick(&ctx, self.host.trim(), self.identity.as_deref());
-        self.primary_memory
-            .tick(&ctx, self.host.trim(), self.identity.as_deref());
+        self.primary_memory.tick(
+            &ctx,
+            self.host.trim(),
+            self.identity.as_deref(),
+            memory::HostMetric::Ram,
+        );
+        self.primary_disk.tick(
+            &ctx,
+            self.host.trim(),
+            self.identity.as_deref(),
+            memory::HostMetric::Disk,
+        );
         self.poll_job(&ctx);
         if !self.quitting {
             self.pending_update = None;
@@ -2304,6 +2475,7 @@ impl Rectangle {
         let mut address_submit = None;
         let mut address_focused = false;
         let mut monitor = false;
+        let mut disk_monitor = false;
         if !block_input
             && let Some(pos) = ui.input(|input| {
                 input
@@ -2399,12 +2571,25 @@ impl Rectangle {
                         home = ui
                             .selectable_label(self.home || self.tabs.is_empty(), "Home")
                             .clicked();
-                        monitor = self.primary_memory.show(
-                            ui,
-                            Backend::Primary.name(&self.host),
-                            !self.host.trim().is_empty(),
-                            compact,
-                        );
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            let name = Backend::Primary.name(&self.host);
+                            let configured = !self.host.trim().is_empty();
+                            monitor = self.primary_memory.show(
+                                ui,
+                                name,
+                                configured,
+                                compact,
+                                memory::HostMetric::Ram,
+                            );
+                            disk_monitor = self.primary_disk.show(
+                                ui,
+                                name,
+                                configured,
+                                compact,
+                                memory::HostMetric::Disk,
+                            );
+                        });
                         edit = ui.button("Settings").clicked();
                         (address_submit, address_focused) =
                             self.address_bar(ui, ui.available_width(), !block_input);
@@ -2468,9 +2653,12 @@ impl Rectangle {
             });
         }
         if !block_input {
-            if monitor && let Err(err) = session::btop(self.host.trim(), self.identity.as_deref()) {
+            if (monitor || disk_monitor)
+                && let Err(err) =
+                    session::monitor(self.host.trim(), self.identity.as_deref(), disk_monitor)
+            {
                 self.error = Some(format!(
-                    "Could not open btop for {}: {err}",
+                    "Could not open the monitor for {}: {err}",
                     Backend::Primary.name(&self.host)
                 ));
             }
@@ -2634,6 +2822,23 @@ impl Rectangle {
                         if drop.is_some() {
                             dropped_tab = drop;
                         }
+                    }
+                    if tab.agent_view == AgentView::Files
+                        && let Some(session) = &tab.session
+                        && tab.ran
+                    {
+                        let target = ctx
+                            .pointer_latest_pos()
+                            .map_or(index == self.active, |pos| pane.contains(pos));
+                        if tab.explorer.show(
+                            ui,
+                            &tab.connection,
+                            &session.token,
+                            show_cursor && target,
+                        ) {
+                            tab.last_input = Some(Instant::now());
+                        }
+                        return;
                     }
                     Self::browser_pane(
                         ui,
@@ -3123,6 +3328,22 @@ impl Rectangle {
         if !block_input {
             response.context_menu(|ui| {
                 if tab.agent_port.is_some() {
+                    for kind in AgentView::ALL
+                        .into_iter()
+                        .filter(|kind| *kind != tab.agent_view)
+                    {
+                        if ui
+                            .add_enabled(
+                                tab.ran && tab.session.is_some() && ready,
+                                egui::Button::new(format!("Open {}", kind.label())),
+                            )
+                            .clicked()
+                        {
+                            action = Some(TabAction::OpenAgentView(kind));
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
                     let mut always_on = tab.always_on;
                     if ui
                         .add_enabled(
@@ -3281,6 +3502,11 @@ impl Rectangle {
             }
             ctx.request_repaint();
         }
+        let index = if matches!(action, TabAction::ToggleAlwaysOn) && index < self.tabs.len() {
+            self.agent_owner_index(index)
+        } else {
+            index
+        };
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
         };
@@ -3343,6 +3569,7 @@ impl Rectangle {
                 tab.agent_resolution = resolution;
                 ctx.request_repaint();
             }
+            TabAction::OpenAgentView(kind) => self.open_agent_view(ctx, index, kind),
             TabAction::ToggleAlwaysOn => {
                 if let Some(session) = &tab.session {
                     let enabled = !tab.always_on;
@@ -3757,6 +3984,7 @@ mod tests {
                         title: title.into(),
                         startup_page: String::new(),
                         agent_port: None,
+                        file_manager: false,
                     })
                     .collect(),
                 ..Default::default()

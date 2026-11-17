@@ -21,6 +21,11 @@ XML
 openbox --config-file /tmp/agent-openbox.xml </dev/null >&2 &
 cd "$HOME/workspace"
 git init -q
+if [ "${RECTANGLE_AGENT_VIEW:-}" = files ]; then
+    # Keep the main display available for Rectangle's session lifecycle.
+    while kill -0 "$display_pid" 2>/dev/null; do sleep 5; done
+    exit
+fi
 exec xterm -fullscreen -fa 'DejaVu Sans Mono' -fs 12 -bg '#0d121a' -fg '#e1e9f0' \
     -xrm 'XTerm*VT100.translations: #override Ctrl <Key>v: insert-selection(CLIPBOARD)' \
     -title Freebuff -hold -e /opt/rectangle/freebuff/freebuff

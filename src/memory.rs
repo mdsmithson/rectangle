@@ -8,6 +8,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone, Copy)]
+pub enum HostMetric {
+    Ram,
+    Disk,
+}
+
+impl HostMetric {
+    fn protocol(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Ram => ("host-memory", "RECTHOSTMEM1"),
+            Self::Disk => ("host-disk", "RECTHOSTDISK1"),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct HostMeter {
     next: Option<Instant>,
@@ -17,8 +32,15 @@ pub struct HostMeter {
 }
 
 impl HostMeter {
-    pub fn tick(&mut self, ctx: &eframe::egui::Context, host: &str, key: Option<&Path>) {
+    pub fn tick(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        host: &str,
+        key: Option<&Path>,
+        metric: HostMetric,
+    ) {
         use std::sync::mpsc::TryRecvError;
+        let (command, protocol) = metric.protocol();
         if host.is_empty() {
             return;
         }
@@ -28,7 +50,7 @@ impl HostMeter {
                 Ok(Ok(response)) => {
                     let mut fields = response.split_whitespace();
                     (|| {
-                        if fields.next()? != "RECTHOSTMEM1" {
+                        if fields.next()? != protocol {
                             return None;
                         }
                         let used: u64 = fields.next()?.parse().ok()?;
@@ -45,7 +67,7 @@ impl HostMeter {
         let now = Instant::now();
         if self.next.is_none_or(|next| now >= next) {
             let repaint = ctx.clone();
-            match crate::saved::run(host, key, "host-memory", move || repaint.request_repaint()) {
+            match crate::saved::run(host, key, command, move || repaint.request_repaint()) {
                 Ok(task) => self.pending = Some(task),
                 Err(_) => {
                     self.reading = None;
@@ -63,15 +85,20 @@ impl HostMeter {
         name: &str,
         configured: bool,
         compact: bool,
+        metric: HostMetric,
     ) -> bool {
         use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
         let width = if compact { 124.0 } else { 163.0 };
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 29.0), egui::Sense::click());
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 17.0), egui::Sense::click());
+        let (label_name, fallback, tool) = match metric {
+            HostMetric::Ram => (name, format!("{name} RAM"), "btop"),
+            HostMetric::Disk => ("Disk", "Disk".into(), "ncdu /"),
+        };
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
                 egui::WidgetType::Button,
                 configured,
-                format!("Open btop for {name}"),
+                format!("Open {tool} for {name}"),
             )
         });
         let (label, ratio) = match self.reading.filter(|_| configured) {
@@ -79,15 +106,15 @@ impl HostMeter {
                 let ratio = (used as f64 / total as f64) as f32;
                 let gib = |n| n as f64 / (1_u64 << 30) as f64;
                 (
-                    format!("{name} {:.1}/{:.1} GiB", gib(used), gib(total)),
+                    format!("{label_name} {:.1}/{:.1} GiB", gib(used), gib(total)),
                     ratio,
                 )
             }
             None => (
                 if !configured || self.unavailable {
-                    format!("{name} RAM —")
+                    format!("{fallback} —")
                 } else {
-                    format!("{name} RAM …")
+                    format!("{fallback} …")
                 },
                 0.0,
             ),
@@ -103,8 +130,8 @@ impl HostMeter {
             },
         );
         let bar = Rect::from_min_max(
-            Pos2::new(rect.left() + 8.0, rect.bottom() - 7.0),
-            Pos2::new(rect.right() - 8.0, rect.bottom() - 4.0),
+            Pos2::new(rect.left() + 8.0, rect.bottom() - 4.0),
+            Pos2::new(rect.right() - 8.0, rect.bottom() - 2.0),
         );
         painter.rect_filled(bar, 2, crate::design::EDGE);
         if ratio > 0.0 {
@@ -121,17 +148,19 @@ impl HostMeter {
                 color,
             );
         }
-        painter.with_clip_rect(rect.shrink(4.0)).text(
-            Pos2::new(rect.center().x, rect.top() + 10.0),
-            egui::Align2::CENTER_CENTER,
-            label,
-            egui::TextStyle::Small.resolve(ui.style()),
-            crate::INK,
-        );
+        painter
+            .with_clip_rect(rect.shrink2(Vec2::new(4.0, 0.0)))
+            .text(
+                Pos2::new(rect.center().x, rect.top() + 7.0),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::TextStyle::Small.resolve(ui.style()),
+                crate::INK,
+            );
         let response = response.on_hover_text(if configured {
-            format!("{name} RAM · Click to open btop over SSH")
+            format!("{fallback} · Click to open {tool} over SSH")
         } else {
-            "Configure the primary server in Settings to view host RAM.".into()
+            "Configure the primary server in Settings to view host usage.".into()
         });
         configured && response.clicked()
     }

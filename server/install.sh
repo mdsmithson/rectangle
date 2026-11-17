@@ -24,6 +24,7 @@ docker build --pull -f Dockerfile.proton -t rectangle-proton:demo .
 install -d -m 700 "$HOME/.local/bin" "$HOME/.config/rectangle"
 install -d -m 700 "$HOME/.config/rectangle/agent-context"
 install -m 600 agent-entrypoint clipboard-stream.py memory-stream.py "$HOME/.config/rectangle/agent-context/"
+install -m 600 agent-view agent-files.py "$HOME/.config/rectangle/"
 install -m 600 session-seccomp.json "$HOME/.config/rectangle/session-seccomp.json"
 install -m 700 rectangle-proton "$HOME/.local/bin/rectangle-proton.next"
 mv -f "$HOME/.local/bin/rectangle-proton.next" "$HOME/.local/bin/rectangle-proton"

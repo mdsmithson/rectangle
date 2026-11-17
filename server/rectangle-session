@@ -136,6 +136,9 @@ case $requested in
             if [ "$layout" != - ] || [ -n "$agent_port" ]; then printf ' %s' "$layout"; fi
             if [ -n "$agent_port" ]; then printf ' %s' "$agent_port"; fi
             if [ -n "$always_on" ] && [ -n "$agent_port" ]; then printf ' %s' "$always_on"; fi
+            if [ -n "$agent_port" ] && [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-view"}}' "rectangle-tab-$id")" = files ]; then
+                printf ' files'
+            fi
             printf '\n'
         done
         exit ;;
@@ -239,6 +242,15 @@ case $requested in
         export XDG_CONFIG_HOME="$config/monitor"
         mkdir -p "$XDG_CONFIG_HOME"
         exec /bin/setpriv --no-new-privs /usr/bin/btop --utf-force ;;
+    host-disk)
+        LC_ALL=C df -Pk / | awk 'NR == 2 && $2 > 0 {
+            printf "RECTHOSTDISK1 %.0f %.0f\n", $3 * 1024, $2 * 1024
+        }'
+        exit ;;
+    host-ncdu)
+        [ -t 0 ] && [ -t 1 ] || { echo 'ncdu requires an SSH terminal.' >&2; exit 1; }
+        command -v ncdu >/dev/null || { echo 'Install ncdu on the Rectangle server.' >&2; exit 1; }
+        exec /bin/setpriv --no-new-privs ncdu -rr / ;;
     proton-status) exec "$HOME/.local/bin/rectangle-proton" status ;;
     proton-view) exec "$HOME/.local/bin/rectangle-proton" view ;;
     proton-replace)
@@ -298,6 +310,9 @@ case $requested in
                 agent_image=$(docker inspect -f '{{.Config.Image}}' "$container")
                 port=$(docker inspect -f '{{index .Config.Labels "rectangle.agent-port"}}' "$container")
                 page="agent:${agent_image#rectangle-agent:}:$port"
+                if [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-view"}}' "$container")" = files ]; then
+                    page="$page:files"
+                fi
                 if [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-storage"}}' "$container")" != volume ]; then
                     init_agent_volume "$id"
                     # Migrate the home directory of Agents started before save support.
@@ -363,6 +378,31 @@ case $requested in
         exit ;;
 esac
 case $requested in
+    'agent-view '*|'agent-files '*|'agent-upload '*)
+        operation=${requested%% *}
+        fields=${requested#* }
+        token=${fields%% *}
+        valid_token "$token" || bad_resolution
+        name="rectangle-tab-$token"
+        [ "$(docker inspect -f '{{if .State.Running}}{{index .Config.Labels "rectangle.role"}}{{end}}' "$name" 2>/dev/null || :)" = agent ] ||
+            { echo 'This Agent container is no longer running.' >&2; exit 1; }
+        IFS=' ' read -r action path file size extra <<EOF
+${fields#* }
+EOF
+        case $operation in
+            agent-view)
+                case $action in sh|freebuff|files) ;; *) exit 1 ;; esac
+                [ -z "$path" ] || exit 1
+                exec docker exec -i "$name" sh -c "$(cat "$config/agent-view")" agent-view "$action" ;;
+            agent-files)
+                case $path in ''|*[!0-9]*) exit 1 ;; esac
+                [ -z "$file" ] || exit 1
+                exec docker exec "$name" python3 -I -c "$(cat "$config/agent-files.py")" list "$action" "$path" ;;
+            agent-upload)
+                case $file in ''|*[!0-9]*) exit 1 ;; esac
+                [ -z "$size$extra" ] || exit 1
+                exec docker exec -i "$name" python3 -I -c "$(cat "$config/agent-files.py")" upload "$action" "$path" "$file" ;;
+        esac ;;
     'agent-preview '*|'agent-preview-check '*)
         operation=${requested%% *}
         token=${requested#* }
@@ -545,11 +585,13 @@ startup_page=
 website_theme=
 search_terms=
 agent_port=
+agent_view=freebuff
 memory_mib=3072
 image=rectangle-browser:demo
 parse_agent() {
     agent=${1#agent:}; image_id=${agent%%:*}; agent_port=${agent#*:}
     [ "$agent" != "$image_id" ] || bad_resolution
+    case $agent_port in *:files) agent_port=${agent_port%:files}; agent_view=files ;; esac
     case $agent_port in ''|0*|*[!0-9]*) bad_resolution ;; esac
     [ "${#agent_port}" -le 5 ] && [ "$agent_port" -ge 1024 ] && [ "$agent_port" -le 65535 ] ||
         { echo 'Choose an Agent port from 1024 to 65535.' >&2; exit 1; }
@@ -785,6 +827,7 @@ except OSError as err:
     network_mode=bridge
     set -- "$@" --publish "$bind_ip:$agent_port:$agent_port/tcp" \
         --label "rectangle.agent-port=$agent_port" --env "PORT=$agent_port" \
+        --label "rectangle.agent-view=$agent_view" --env "RECTANGLE_AGENT_VIEW=$agent_view" \
         --label rectangle.agent-storage=volume --env HOME=/agent/home \
         --tmpfs /run/freebuff-tmp:rw,nosuid,nodev,exec,size=128m,mode=0700,uid=10001,gid=10001 \
         --env TMPDIR=/run/freebuff-tmp \

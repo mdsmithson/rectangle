@@ -27,7 +27,7 @@ pub struct Session {
 pub enum StartPage<'a> {
     Url(&'a str),
     Search(&'a str),
-    Agent(&'a str, u16),
+    Agent(&'a str, u16, bool),
 }
 
 pub fn ssh_command(
@@ -38,11 +38,12 @@ pub fn ssh_command(
     make_ssh_command(host, identity, remote_command, false)
 }
 
-pub fn btop(host: &str, identity: Option<&std::path::Path>) -> io::Result<()> {
+pub fn monitor(host: &str, identity: Option<&std::path::Path>, disk: bool) -> io::Result<()> {
+    let request = if disk { "host-ncdu" } else { "host-btop" };
     let command = make_ssh_command(
         host,
         identity,
-        "exec ~/.local/bin/rectangle-session host-btop",
+        &format!("exec ~/.local/bin/rectangle-session {request}"),
         true,
     )?;
     #[cfg(windows)]
@@ -187,11 +188,14 @@ impl Session {
             StartPage::Search(query) => {
                 remote.push_str(&format!(" search:{}", crate::saved::encode(query)));
             }
-            StartPage::Agent(image, port) => {
+            StartPage::Agent(image, port, file_manager) => {
                 if image != "demo" && !crate::saved::valid_id(image) {
                     return Err(io::ErrorKind::InvalidInput.into());
                 }
                 remote.push_str(&format!(" agent:{image}:{port}"));
+                if file_manager {
+                    remote.push_str(":files");
+                }
             }
         }
         Self::connect(host, identity, &remote, token, repaint)
@@ -210,6 +214,23 @@ impl Session {
             host,
             identity,
             &format!("exec ~/.local/bin/rectangle-session resume {token}"),
+            token.to_owned(),
+            repaint,
+        )
+    }
+
+    pub fn agent_view(
+        host: &str,
+        identity: Option<&std::path::Path>,
+        token: &str,
+        kind: crate::AgentView,
+        repaint: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
+        let kind = kind.command();
+        Self::connect(
+            host,
+            identity,
+            &format!("exec ~/.local/bin/rectangle-session agent-view {token} {kind}"),
             token.to_owned(),
             repaint,
         )
