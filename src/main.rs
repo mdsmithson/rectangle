@@ -116,6 +116,7 @@ enum TabAction {
     Select,
     Close,
     Rename,
+    Clone,
     Snap(Option<Snap>),
     Park,
     Mute,
@@ -206,6 +207,7 @@ enum Job {
     SetAgentMemory(AgentMemoryDraft),
     OpenPreview(u64),
     BuildAgent(Backend, String, String, u16, Option<Snap>),
+    CloneTab(Backend),
     List(Backend),
     ParkedList(Backend),
     OpenSaved(Backend, saved::Entry, Option<Snap>),
@@ -222,6 +224,7 @@ enum Dialog {
     AgentInfo(AgentInfo, String, String),
     AgentMemory(AgentMemoryDraft),
     Rename(u64, String),
+    Clone(u64, String),
     Close(u64, String),
     Forget(Backend, saved::Entry),
     StopParked(Backend, saved::Parked),
@@ -1408,6 +1411,24 @@ impl Rectangle {
             _ => None,
         };
         let result = match job {
+            Job::CloneTab(backend) => result.and_then(|data| {
+                let mut entries = saved::parse(&data)?;
+                let entry = entries
+                    .pop()
+                    .filter(|_| entries.is_empty())
+                    .ok_or_else(|| {
+                        std::io::Error::other("The server did not return the cloned tab.")
+                    })?;
+                match backend {
+                    Backend::Primary => &mut self.entries,
+                    Backend::Secondary => &mut self.secondary_entries,
+                }
+                .push(entry.clone());
+                if !self.quitting {
+                    self.open_tab(ctx, backend, Some(entry), None);
+                }
+                Ok(())
+            }),
             Job::OpenPreview(id) => result.and_then(|report| {
                 if !self.quitting
                     && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
@@ -2146,6 +2167,7 @@ impl Rectangle {
             Dialog::AgentInfo(info, ..) => info.label(),
             Dialog::AgentMemory(_) => "Agent memory limit",
             Dialog::Rename(..) => "Rename tab",
+            Dialog::Clone(..) => "Clone tab",
             Dialog::Close(..) => "Close tab",
             Dialog::Forget(..) => "Delete saved session",
             Dialog::StopParked(..) => "Stop parked session",
@@ -2210,6 +2232,11 @@ impl Rectangle {
                     Dialog::NewTab(_) => unreachable!(),
                     Dialog::Rename(_, name) | Dialog::Close(_, name) => {
                         ui.text_edit_singleline(name);
+                    }
+                    Dialog::Clone(_, name) => {
+                        ui.label("Name the new tab");
+                        ui.text_edit_singleline(name);
+                        ui.label("The source pauses during copying. The clone is saved to Home and opens when ready.");
                     }
                     Dialog::Forget(_, entry) => {
                         let data = if entry.agent_port.is_some() { "Agent workspace" } else { "browser data" };
@@ -2287,9 +2314,18 @@ impl Rectangle {
                                 choice = 1;
                             }
                         }
+                        Dialog::Clone(id, name) => {
+                            let valid = saved::title(name).is_some_and(|name| {
+                                self.tabs.iter().any(|tab| tab.id == *id && tab.session.is_some())
+                                    && self.tabs.iter().all(|tab| !tab.title.eq_ignore_ascii_case(name))
+                            });
+                            if ui.add_enabled(valid && self.job.is_none() && self.tabs.len() < MAX_TABS, egui::Button::new("Clone")).clicked() {
+                                choice = 1;
+                            }
+                        }
                         _ => {}
                     }
-                    if !matches!(dialog, Dialog::Rename(..)) && ui.button("Delete").clicked() {
+                    if !matches!(dialog, Dialog::Rename(..) | Dialog::Clone(..)) && ui.button("Delete").clicked() {
                         choice = 2;
                     }
                     if ui.button("Cancel").clicked() {
@@ -2331,6 +2367,25 @@ impl Rectangle {
                     } else if tab.agent_owner == Some(id) {
                         tab.agent_parent_title = Some(name.trim().into());
                     }
+                }
+            }
+            (1, Dialog::Clone(id, name)) => {
+                if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id)
+                    && let Some(session) = &tab.session
+                {
+                    let mut request =
+                        format!("clone-tab {} {}", session.token, saved::encode(name.trim()));
+                    if let Some(page) = tab
+                        .navigation
+                        .as_ref()
+                        .and_then(navigation::Navigation::state)
+                        .and_then(|state| settings::startup_page(&state.url).ok())
+                        .filter(|page| !page.is_empty())
+                    {
+                        request.push(' ');
+                        request.push_str(&saved::encode(&page));
+                    }
+                    self.request(ctx, Job::CloneTab(tab.backend), tab.backend, &request);
                 }
             }
             (1 | 2, Dialog::Close(id, name)) => {
@@ -2685,10 +2740,9 @@ impl Rectangle {
         let mut block_input = restoring
             || self.dialog.is_some()
             || self.settings_edit.is_some()
-            || self
-                .job
-                .as_ref()
-                .is_some_and(|(job, _)| matches!(job, Job::Close(..) | Job::IdleSave(..)));
+            || self.job.as_ref().is_some_and(|(job, _)| {
+                matches!(job, Job::Close(..) | Job::IdleSave(..) | Job::CloneTab(..))
+            });
         self.dialogs(&ctx);
         if self.quitting {
             return;
@@ -2974,6 +3028,11 @@ impl Rectangle {
                 ui.label("Checking for parked tabs…");
             });
             return;
+        } else if matches!(&self.job, Some((Job::CloneTab(..), _))) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Cloning tab… The source will resume when the copy is ready.");
+            });
         } else if matches!(&self.job, Some((Job::PrepareAgentMedia(..), _))) {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -3749,6 +3808,15 @@ impl Rectangle {
                         ui.close();
                     }
                 }
+                if tab.agent_owner.is_none()
+                    && tab.session.is_some()
+                    && ui
+                        .add_enabled(ready, egui::Button::new("Clone tab…"))
+                        .clicked()
+                {
+                    action = Some(TabAction::Clone);
+                    ui.close();
+                }
                 if ui.button("Rename tab").clicked() {
                     action = Some(TabAction::Rename);
                     ui.close();
@@ -3792,6 +3860,7 @@ impl Rectangle {
         } else {
             index
         };
+        let has_tab_slot = self.tabs.len() < MAX_TABS;
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
         };
@@ -3801,6 +3870,13 @@ impl Rectangle {
             TabAction::Rename => {
                 tab.blur();
                 self.dialog = Some(Dialog::Rename(tab.id, tab.title.clone()));
+            }
+            TabAction::Clone => {
+                if !has_tab_slot {
+                    self.error = Some("Close a tab before cloning.".into());
+                } else if tab.agent_owner.is_none() && tab.session.is_some() {
+                    self.dialog = Some(Dialog::Clone(tab.id, String::new()));
+                }
             }
             TabAction::Snap(snap) => {
                 let id = tab.id;

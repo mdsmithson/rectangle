@@ -341,6 +341,16 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
             fi
         done
         exit ;;
+    'clone-tab '*)
+        fields=${requested#* }
+        IFS=' ' read -r token title page extra <<EOF
+$fields
+EOF
+        valid_token "$token" && [ -n "$title" ] && [ -z "$extra" ] || bad_resolution
+        if [ -n "$page" ]; then decode_startup_page "$page" >/dev/null || bad_resolution; fi
+        [ -f "$assets/clone-tab.py" ] || { echo 'Update this server to clone tabs.' >&2; exit 1; }
+        park_lock
+        exec python3 -I "$assets/clone-tab.py" "$token" "$title" "$rectangle_agent_image" "$page" ;;
     'startup-page '*)
         fields=${requested#* }; id=${fields%% *}; page=${fields#* }
         valid_token "$id" || bad_resolution
