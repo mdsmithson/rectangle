@@ -11,6 +11,14 @@ case $mode in
         display=${mode#edit}; display=${display:-103}; title='SH Terminal · Vim'; program=python3 ;;
     *) exit 1 ;;
 esac
+# Display startup needs space for its PID lock and Unix sockets. Diagnose
+# exhaustion before Xvnc reports a misleading lock-file failure.
+python3 -I -c '
+import os, sys
+space = os.statvfs("/tmp")
+if space.f_bavail * space.f_frsize < 8 * 1024 * 1024 or not space.f_favail:
+    sys.exit("The Agent temporary storage (/tmp) is full or nearly full. Free temporary files from SH Terminal, then reopen this view. Files in /agent/home are separate.")
+'
 lock_name=$mode
 if [ "$display" = 103 ]; then lock_name=edit; fi
 lock="/tmp/rectangle-view-$lock_name"
