@@ -6,7 +6,9 @@ mod audio;
 mod clipboard;
 mod design;
 mod files;
+mod graphics;
 mod images;
+mod launch_trace;
 mod mark;
 mod memory;
 mod navigation;
@@ -386,6 +388,7 @@ struct Tab {
 }
 
 fn main() -> eframe::Result {
+    launch_trace::checkpoint("main");
     let host = std::env::args().nth(1).unwrap_or_default();
     let identity = std::env::args_os().nth(2).map(std::path::PathBuf::from);
     let (host, identity, error) = match settings::load() {
@@ -421,7 +424,8 @@ fn main() -> eframe::Result {
             error.or_else(|| Some(format!("Could not load Agent images: {err}"))),
         ),
     };
-    let options = eframe::NativeOptions {
+    launch_trace::checkpoint("settings-loaded");
+    let mut options = eframe::NativeOptions {
         persistence_path: settings::window_path().ok(),
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 790.0])
@@ -433,10 +437,13 @@ fn main() -> eframe::Result {
             }),
         ..Default::default()
     };
+    options.wgpu_options.wgpu_setup = graphics::setup();
+    launch_trace::checkpoint("graphics-prepared");
     eframe::run_native(
         "Rectangle",
         options,
         Box::new(move |cc| {
+            launch_trace::checkpoint("graphics-ready");
             design::theme(&cc.egui_ctx);
             let mut app = Rectangle {
                 marble: Some(design::marble(&cc.egui_ctx)),
@@ -450,7 +457,9 @@ fn main() -> eframe::Result {
                 error,
                 ..Default::default()
             };
+            launch_trace::checkpoint("artwork-ready");
             app.find_parked_on_startup(&cc.egui_ctx);
+            launch_trace::checkpoint("app-ready");
             Ok(Box::new(app))
         }),
     )
@@ -2544,6 +2553,7 @@ impl eframe::App for Rectangle {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        launch_trace::frame(ui.ctx());
         let outer = ui.available_rect_before_wrap();
         if let Some(texture) = &self.marble {
             design::background(ui, texture, outer);
