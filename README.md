@@ -59,6 +59,10 @@ In **Settings → Connections**, enter your own `user@host` and the path to your
 
 ## Use Rectangle
 
+Codex tabs default to **QHD (2560 × 1440)**. Right-click the tab and open **Resolution** to select QHD, Full HD, 4K, Match Tile, or Match Host.
+
+To authorize the container’s Codex engine from another computer, open **SH Terminal** in that container and run `codex login --device-auth`. Open the displayed link on the other computer, enter the code, and approve sign-in. Keep the command running until it confirms success. Enable device-code login in your ChatGPT security settings or workspace permissions first. Afterward, return to the Codex app and check the account. If needed, save and reopen the tab to reload the cached credentials. The app’s browser sign-in flow is also available inside its container.
+
 When creating an **Agent** or **File Manager** tab, choose **Freebuff** or **ChatGPT Codex** under **Agent app**. Codex uses the official Linux desktop app on Debian 13, with its main windows maximized and its dialogs visible. Sign in inside the container and select Codex in the app. Its workspace, app settings, and credentials stay in that Agent’s persistent home directory.
 
 Codex containers include Python, Node.js/npm, Git, and an OpenSSH client. Their selected TCP port follows the existing Agent publishing settings. Services must listen on `0.0.0.0` and use `PORT`. Outbound SSH uses the container’s own `~/.ssh` keys and host verification. Install your own keys through File Manager or SH Terminal. The server and Windows login keys are separate.

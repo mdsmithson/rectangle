@@ -36,7 +36,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 export DISPLAY=:$display
-Xvnc "$DISPLAY" -geometry 1024x640 -depth 24 -nolisten tcp -localhost \
+geometry=1024x640
+if [ "$mode" = codex ]; then geometry=2560x1440; fi
+Xvnc "$DISPLAY" -geometry "$geometry" -depth 24 -nolisten tcp -localhost \
     -rfbport -1 -rfbunixpath "$lock/rfb" -SecurityTypes None -AcceptSetDesktopSize=1 \
     -AcceptCutText=0 -SendCutText=0 </dev/null >&2 &
 xvnc=$!

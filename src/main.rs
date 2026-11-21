@@ -180,13 +180,17 @@ enum AgentResolution {
     MatchTile,
     MatchHost,
     Uhd,
+    Qhd,
+    FullHd,
     Dci2k,
     OneK,
 }
 
 impl AgentResolution {
-    const OPTIONS: [(Self, &str); 5] = [
+    const OPTIONS: [(Self, &str); 7] = [
         (Self::Uhd, "4K UHD (3840 × 2160)"),
+        (Self::Qhd, "QHD (2560 × 1440)"),
+        (Self::FullHd, "Full HD (1920 × 1080)"),
         (Self::Dci2k, "2K (2048 × 1080)"),
         (Self::OneK, "1K (1024 × 576)"),
         (Self::MatchTile, "Match Tile"),
@@ -198,6 +202,8 @@ impl AgentResolution {
             Self::MatchTile => tile,
             Self::MatchHost => host.map_or(tile, |size| rfb::Resolution::fit(size.x, size.y)),
             Self::Uhd => rfb::Resolution(3840, 2160),
+            Self::Qhd => rfb::Resolution(2560, 1440),
+            Self::FullHd => rfb::Resolution(1920, 1080),
             Self::Dci2k => rfb::Resolution(2048, 1080),
             Self::OneK => rfb::Resolution(1024, 576),
         }
@@ -958,6 +964,11 @@ impl Rectangle {
                     profile: entry.profile,
                     agent_port: entry.agent_port,
                     codex: entry.codex,
+                    agent_resolution: if entry.codex {
+                        AgentResolution::Qhd
+                    } else {
+                        AgentResolution::MatchTile
+                    },
                     agent_view: if entry.file_manager {
                         AgentView::Files
                     } else if entry.codex {
@@ -1140,6 +1151,8 @@ impl Rectangle {
             || entry.as_ref().is_some_and(|entry| entry.codex);
         if file_manager {
             size = rfb::Resolution::FALLBACK;
+        } else if codex {
+            size = rfb::Resolution(2560, 1440);
         }
         let start = if agent_port.is_some() && entry.is_some() {
             session::StartPage::Url("")
@@ -1178,6 +1191,11 @@ impl Rectangle {
                     backend,
                     agent_port,
                     codex,
+                    agent_resolution: if codex {
+                        AgentResolution::Qhd
+                    } else {
+                        AgentResolution::MatchTile
+                    },
                     agent_view: if file_manager {
                         AgentView::Files
                     } else if codex {
@@ -1315,6 +1333,11 @@ impl Rectangle {
                     title: kind.label().into(),
                     agent_port: Some(port),
                     codex: owner.codex,
+                    agent_resolution: if owner.codex {
+                        AgentResolution::Qhd
+                    } else {
+                        AgentResolution::MatchTile
+                    },
                     agent_view: kind,
                     agent_owner: Some(owner_id),
                     agent_parent_title: Some(owner.title.clone()),
@@ -4215,6 +4238,8 @@ mod tests {
         let host = Some(Vec2::new(2560.0, 1440.0));
         for (mode, expected) in [
             (AgentResolution::Uhd, Resolution(3840, 2160)),
+            (AgentResolution::Qhd, Resolution(2560, 1440)),
+            (AgentResolution::FullHd, Resolution(1920, 1080)),
             (AgentResolution::Dci2k, Resolution(2048, 1080)),
             (AgentResolution::OneK, Resolution(1024, 576)),
             (AgentResolution::MatchHost, Resolution(2560, 1440)),

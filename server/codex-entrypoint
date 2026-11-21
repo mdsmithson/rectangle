@@ -6,7 +6,7 @@ chmod 700 "$HOME/.ssh"
 mkdir -m 1777 /tmp/.X11-unix
 export XDG_RUNTIME_DIR=/tmp/rectangle-runtime
 mkdir -m 700 "$XDG_RUNTIME_DIR"
-Xvnc "$DISPLAY" -geometry "${RECTANGLE_WIDTH:-1024}x${RECTANGLE_HEIGHT:-640}" -depth 24 \
+Xvnc "$DISPLAY" -geometry "${RECTANGLE_WIDTH:-2560}x${RECTANGLE_HEIGHT:-1440}" -depth 24 \
     -nolisten tcp -localhost -rfbport 5900 -SecurityTypes None \
     -AcceptSetDesktopSize=1 -AcceptCutText=0 -SendCutText=0 </dev/null >&2 &
 display_pid=$!
