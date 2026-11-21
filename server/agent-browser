@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+umask 077
+if command -v firefox-esr >/dev/null 2>&1; then browser=firefox-esr
+elif command -v firefox >/dev/null 2>&1; then browser=firefox
+else echo 'Firefox is missing from this Agent image.' >&2; exit 1
+fi
+# Use the linked Browser tab when it is open, including URLs launched by Codex.
+if [ -S /tmp/.X11-unix/X128 ]; then
+    export DISPLAY=:128
+    export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/rectangle-view-browser/bus
+    profile="$HOME/.rectangle/browser-tab"
+else
+    profile="$HOME/.rectangle/browser-main"
+fi
+mkdir -p "$profile"
+if [ ! -f "$profile/user.js" ]; then
+    cat > "$profile/user.js" <<'PREFS'
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+PREFS
+fi
+exec "$browser" --profile "$profile" "$@"

@@ -19,8 +19,11 @@ RUN test "${TARGETARCH:-amd64}" = amd64 \
     && chown -R 10001:10001 /agent/home \
     && ln -s /usr/bin/Xtigervnc /usr/local/bin/Xvnc
 COPY --chmod=0555 codex-entrypoint /opt/rectangle/agent-entrypoint
+COPY --chmod=0555 agent-browser /opt/rectangle/agent-browser
+COPY --chmod=0444 agent-browser.desktop /usr/share/applications/rectangle-agent-browser.desktop
+COPY --chmod=0444 agent-mimeapps.list /etc/xdg/mimeapps.list
 COPY --chmod=0444 clipboard-stream.py memory-stream.py /opt/rectangle/
 RUN ln -s /usr/lib/chatgpt/resources/codex /usr/local/bin/codex
-ENV HOME=/agent/home DISPLAY=:99 LANG=C.UTF-8 TERM=xterm-256color RECTANGLE_AGENT_FLAVOR=codex
+ENV HOME=/agent/home DISPLAY=:99 LANG=C.UTF-8 TERM=xterm-256color RECTANGLE_AGENT_FLAVOR=codex BROWSER=/opt/rectangle/agent-browser
 USER 10001:10001
 ENTRYPOINT ["/opt/rectangle/agent-entrypoint"]

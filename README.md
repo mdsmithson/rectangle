@@ -59,6 +59,10 @@ In **Settings → Connections**, enter your own `user@host` and the path to your
 
 ## Use Rectangle
 
+Right-click an Agent tab and choose **Open Browser** to open Firefox in a linked tab inside that same container. Its browser profile stays in the Agent’s persistent home directory. Open this Browser tab before clicking **Continue to sign in** in Codex. The app’s web links are then directed to that Browser tab, and localhost login callbacks reach Codex inside the same container. Return to the Codex tab when sign-in finishes.
+
+Open Browser requires the 0.1.21 launcher and updated Freebuff or Codex image. Save and reopen existing Agents after **Sync servers** to start them with the updated image. Custom Agent images need Firefox and the browser helper from the current Agent Dockerfile.
+
 Codex tabs default to **QHD (2560 × 1440)**. Right-click the tab and open **Resolution** to select QHD, Full HD, 4K, Match Tile, or Match Host.
 
 To authorize the container’s Codex engine from another computer, open **SH Terminal** in that container and run `codex login --device-auth`. Open the displayed link on the other computer, enter the code, and approve sign-in. Keep the command running until it confirms success. Enable device-code login in your ChatGPT security settings or workspace permissions first. Afterward, return to the Codex app and check the account. If needed, save and reopen the tab to reload the cached credentials. The app’s browser sign-in flow is also available inside its container.

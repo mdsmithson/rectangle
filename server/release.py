@@ -20,8 +20,10 @@ IMAGES = {
     "browser": ("Dockerfile", "firefox-policies.json", "rectangle-autoconfig.js",
                 "rectangle.cfg", "navigation-stream.py", "entrypoint", "audio-stream",
                 "clipboard-stream.py", "memory-stream.py", "demo.html"),
-    "agent": ("Dockerfile.agent", "agent-entrypoint", "clipboard-stream.py", "memory-stream.py"),
-    "codex": ("Dockerfile.codex", "codex-entrypoint", "clipboard-stream.py", "memory-stream.py"),
+    "agent": ("Dockerfile.agent", "agent-entrypoint", "agent-browser", "agent-browser.desktop",
+              "agent-mimeapps.list", "clipboard-stream.py", "memory-stream.py"),
+    "codex": ("Dockerfile.codex", "codex-entrypoint", "agent-browser", "agent-browser.desktop",
+              "agent-mimeapps.list", "clipboard-stream.py", "memory-stream.py"),
     "egress": ("Dockerfile.egress", "egress.py"),
     "vpn": ("Dockerfile.vpn", "egress.py", "vpn.py"),
     "proton": ("Dockerfile.proton", "egress.py", "proton.py"),
@@ -103,7 +105,7 @@ def activate(source, commit, expected):
     if not SHA.fullmatch(commit) or source_version(source) != expected:
         raise ValueError("The checked-out server source does not match the requested release.")
     server = source / "server"
-    for filename in ("rectangle-session", "rectangle-proton", "agent-view", "release-launcher", "codex-entrypoint"):
+    for filename in ("rectangle-session", "rectangle-proton", "agent-view", "release-launcher", "codex-entrypoint", "agent-browser"):
         command("sh", "-n", server / filename, timeout=10)
     images = stage_images(server)
     releases = ROOT / "releases"
@@ -119,6 +121,8 @@ def activate(source, commit, expected):
         for filename in ("agent-entrypoint", "clipboard-stream.py", "memory-stream.py"):
             copy(server / filename, context / filename, 0o600)
         copy(server / "codex-entrypoint", context / "codex-entrypoint", 0o600)
+        for filename in ("agent-browser", "agent-browser.desktop", "agent-mimeapps.list"):
+            copy(server / filename, context / filename, 0o600)
         (release / "images.sh").write_text("".join(f"rectangle_{name}_image={tag}\n" for name, tag in images.items()))
         (release / "release.json").write_text(json.dumps({"version": expected, "commit": commit}))
         next_link = release / ".activate"

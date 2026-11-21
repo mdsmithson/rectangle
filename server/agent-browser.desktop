@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Rectangle Agent Browser
+Exec=/opt/rectangle/agent-browser %u
+Terminal=false
+MimeType=x-scheme-handler/http;x-scheme-handler/https;text/html;
+Categories=Network;WebBrowser;

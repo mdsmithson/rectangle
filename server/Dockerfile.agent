@@ -1,6 +1,6 @@
 FROM python:3.15.2-alpine3.24
 RUN apk add --no-cache nodejs npm gcompat libstdc++ bash git ripgrep ca-certificates \
-    tigervnc openbox xterm socat font-dejavu xclip xdotool vim openssh-client \
+    tigervnc openbox xterm socat font-dejavu xclip xdotool vim openssh-client firefox dbus \
     elixir erlang-dev cargo rust curl ruby ruby-dev ruby-bundler \
     build-base linux-headers pkgconf openssl-dev \
     && addgroup -g 10001 rectangle && adduser -D -H -u 10001 -G rectangle rectangle \
@@ -14,7 +14,10 @@ RUN apk add --no-cache nodejs npm gcompat libstdc++ bash git ripgrep ca-certific
     && rm -rf /root/.config/manicode \
     && npm cache clean --force
 COPY --chmod=0555 agent-entrypoint /opt/rectangle/agent-entrypoint
+COPY --chmod=0555 agent-browser /opt/rectangle/agent-browser
+COPY --chmod=0444 agent-browser.desktop /usr/share/applications/rectangle-agent-browser.desktop
+COPY --chmod=0444 agent-mimeapps.list /etc/xdg/mimeapps.list
 COPY --chmod=0444 clipboard-stream.py memory-stream.py /opt/rectangle/
-ENV HOME=/tmp/home DISPLAY=:99 LANG=C.UTF-8 TERM=xterm-256color
+ENV HOME=/tmp/home DISPLAY=:99 LANG=C.UTF-8 TERM=xterm-256color BROWSER=/opt/rectangle/agent-browser
 USER 10001:10001
 ENTRYPOINT ["/opt/rectangle/agent-entrypoint"]

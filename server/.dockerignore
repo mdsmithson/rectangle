@@ -10,6 +10,9 @@
 !codex-entrypoint
 !Dockerfile.smb
 !agent-entrypoint
+!agent-browser
+!agent-browser.desktop
+!agent-mimeapps.list
 !proton.py
 !vpn.py
 !egress.py

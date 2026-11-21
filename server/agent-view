@@ -6,6 +6,9 @@ case $mode in
     sh) display=100; title='SH Terminal'; program=/bin/sh ;;
     freebuff) display=101; title=Freebuff; program=/opt/rectangle/freebuff/freebuff ;;
     codex) display=101; title='ChatGPT Codex'; program=/usr/lib/chatgpt/codex-launcher ;;
+    browser)
+        display=128; title=Browser; program=/opt/rectangle/agent-browser
+        [ -x "$program" ] || { echo 'Save and reopen this Agent with the updated image to use Open Browser.' >&2; exit 1; } ;;
     files) display=102; program= ;;
     edit|edit10[3-9]|edit11[0-9]|edit12[0-7])
         command -v vim >/dev/null || { echo 'Vim is missing. Reopen the Agent with the updated image.' >&2; exit 1; }
@@ -24,20 +27,22 @@ lock_name=$mode
 if [ "$display" = 103 ]; then lock_name=edit; fi
 lock="/tmp/rectangle-view-$lock_name"
 mkdir "$lock" || { echo 'This terminal view is already open.' >&2; exit 1; }
-xvnc= manager= terminal=
+xvnc= manager= terminal= bus=
 cleanup() {
-    for pid in "$terminal" "$manager" "$xvnc"; do
+    for pid in "$terminal" "$manager" "$xvnc" "$bus"; do
         if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || :; fi
     done
     wait || :
     rm -f -- "$lock/rfb"
+    rm -f -- "$lock/openbox.xml"
+    rm -f -- "$lock/bus"
     rmdir "$lock"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 export DISPLAY=:$display
 geometry=1024x640
-if [ "$mode" = codex ]; then geometry=2560x1440; fi
+if [ "$mode" = codex ] || [ "$mode" = browser ]; then geometry=2560x1440; fi
 Xvnc "$DISPLAY" -geometry "$geometry" -depth 24 -nolisten tcp -localhost \
     -rfbport -1 -rfbunixpath "$lock/rfb" -SecurityTypes None -AcceptSetDesktopSize=1 \
     -AcceptCutText=0 -SendCutText=0 </dev/null >&2 &
@@ -49,7 +54,19 @@ for i in $(seq 1 60); do
 done
 [ -S "/tmp/.X11-unix/X$display" ]
 if [ -n "$program" ]; then
-    openbox --config-file /tmp/agent-openbox.xml </dev/null >&2 &
+    if [ "$mode" = browser ]; then
+        cat > "$lock/openbox.xml" <<'XML'
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <applications>
+    <application type="normal"><maximized>yes</maximized><decor>no</decor></application>
+    <application type="dialog"><position force="no"><x>center</x><y>center</y></position></application>
+  </applications>
+</openbox_config>
+XML
+        openbox --config-file "$lock/openbox.xml" </dev/null >&2 &
+    else
+        openbox --config-file /tmp/agent-openbox.xml </dev/null >&2 &
+    fi
     manager=$!
     cd "$HOME/workspace"
     if [ "$program" = python3 ]; then
@@ -59,6 +76,16 @@ if [ -n "$program" ]; then
     fi
     if [ "$mode" = codex ]; then
         dbus-run-session -- "$program" --ozone-platform=x11 --disable-gpu </dev/null >&2 &
+    elif [ "$mode" = browser ]; then
+        dbus-daemon --session --address="unix:path=$lock/bus" --nofork --nopidfile </dev/null >&2 &
+        bus=$!
+        for i in $(seq 1 60); do
+            [ ! -S "$lock/bus" ] || break
+            kill -0 "$bus" 2>/dev/null || exit 1
+            sleep .1
+        done
+        [ -S "$lock/bus" ]
+        "$program" --new-window about:blank </dev/null >&2 &
     else
     xterm -fullscreen -fa 'DejaVu Sans Mono' -fs 12 -bg '#0d121a' -fg '#e1e9f0' \
         -xrm 'XTerm*VT100.translations: #override Ctrl <Key>v: insert-selection(CLIPBOARD)' \

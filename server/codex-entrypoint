@@ -31,5 +31,5 @@ if [ "${RECTANGLE_AGENT_VIEW:-}" = files ]; then
     while kill -0 "$display_pid" 2>/dev/null; do sleep 5; done
     exit
 fi
-export BROWSER=firefox-esr
+export BROWSER=/opt/rectangle/agent-browser
 exec dbus-run-session -- /usr/lib/chatgpt/codex-launcher --ozone-platform=x11 --disable-gpu

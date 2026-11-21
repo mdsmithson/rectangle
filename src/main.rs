@@ -136,17 +136,19 @@ enum AgentView {
     #[default]
     Freebuff,
     Codex,
+    Browser,
     Files,
     Shell,
 }
 
 impl AgentView {
-    const ALL: [Self; 3] = [Self::Files, Self::Shell, Self::Freebuff];
+    const ALL: [Self; 4] = [Self::Files, Self::Shell, Self::Freebuff, Self::Browser];
 
     fn command(self) -> &'static str {
         match self {
             Self::Freebuff => "freebuff",
             Self::Codex => "codex",
+            Self::Browser => "browser",
             Self::Files => "files",
             Self::Shell => "sh",
         }
@@ -156,6 +158,7 @@ impl AgentView {
         match self {
             Self::Freebuff => "Freebuff Terminal",
             Self::Codex => "ChatGPT Codex",
+            Self::Browser => "Browser",
             Self::Files => "File Manager",
             Self::Shell => "SH Terminal",
         }
@@ -166,7 +169,7 @@ impl Tab {
     fn terminal_view(&self) -> Option<String> {
         self.agent_port?;
         match (self.agent_view, self.agent_owner, self.file_editor) {
-            (AgentView::Files, _, _) => None,
+            (AgentView::Files | AgentView::Browser | AgentView::Codex, _, _) => None,
             (_, _, Some(display)) => Some(format!("edit{display}")),
             (_, None, _) => Some("main".into()),
             (view, Some(_), _) => Some(view.command().into()),

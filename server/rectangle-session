@@ -522,14 +522,14 @@ EOF
             agent-clipboard)
                 [ -z "$path$file$size$extra" ] || exit 1
                 case $action in
-                    sh) display=100 ;; freebuff|codex) display=101 ;; edit) display=103 ;;
+                    sh) display=100 ;; freebuff|codex) display=101 ;; browser) display=128 ;; edit) display=103 ;;
                     edit10[3-9]|edit11[0-9]|edit12[0-7]) display=${action#edit} ;;
                     *) exit 1 ;;
                 esac
                 exec docker exec -i -e "DISPLAY=:$display" "$name" python3 -I /opt/rectangle/clipboard-stream.py ;;
             agent-view)
                 case $action in
-                    sh|freebuff|codex|files)
+                    sh|freebuff|codex|browser|files)
                         [ -z "$path" ] || exit 1
                         exec docker exec -i "$name" sh -c "$(cat "$assets/agent-view")" agent-view "$action" ;;
                     edit|edit10[3-9]|edit11[0-9]|edit12[0-7])
