@@ -189,7 +189,7 @@ impl Session {
                 remote.push_str(&format!(" search:{}", crate::saved::encode(query)));
             }
             StartPage::Agent(image, port, file_manager) => {
-                if image != "demo" && !crate::saved::valid_id(image) {
+                if !matches!(image, "demo" | "codex") && !crate::saved::valid_id(image) {
                     return Err(io::ErrorKind::InvalidInput.into());
                 }
                 remote.push_str(&format!(" agent:{image}:{port}"));

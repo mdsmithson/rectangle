@@ -6,6 +6,8 @@
 !Dockerfile.vpn
 !Dockerfile.proton
 !Dockerfile.agent
+!Dockerfile.codex
+!codex-entrypoint
 !Dockerfile.smb
 !agent-entrypoint
 !proton.py

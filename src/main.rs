@@ -135,6 +135,7 @@ enum TabAction {
 enum AgentView {
     #[default]
     Freebuff,
+    Codex,
     Files,
     Shell,
 }
@@ -145,6 +146,7 @@ impl AgentView {
     fn command(self) -> &'static str {
         match self {
             Self::Freebuff => "freebuff",
+            Self::Codex => "codex",
             Self::Files => "files",
             Self::Shell => "sh",
         }
@@ -153,6 +155,7 @@ impl AgentView {
     fn label(self) -> &'static str {
         match self {
             Self::Freebuff => "Freebuff Terminal",
+            Self::Codex => "ChatGPT Codex",
             Self::Files => "File Manager",
             Self::Shell => "SH Terminal",
         }
@@ -314,6 +317,7 @@ struct NewTab {
     slot: Option<Snap>,
     backend: Backend,
     image: usize,
+    codex: bool,
     name: String,
     port: String,
     port_host: Option<Backend>,
@@ -330,6 +334,7 @@ struct Tab {
     page_rect: Option<Rect>,
     preview: Option<preview::Preview>,
     agent_port: Option<u16>,
+    codex: bool,
     agent_view: AgentView,
     agent_owner: Option<u64>,
     agent_parent_title: Option<String>,
@@ -952,8 +957,11 @@ impl Rectangle {
                     volume,
                     profile: entry.profile,
                     agent_port: entry.agent_port,
+                    codex: entry.codex,
                     agent_view: if entry.file_manager {
                         AgentView::Files
+                    } else if entry.codex {
+                        AgentView::Codex
                     } else {
                         AgentView::Freebuff
                     },
@@ -1128,6 +1136,8 @@ impl Rectangle {
         };
         let file_manager = matches!(&address, Some(session::StartPage::Agent(_, _, true)))
             || entry.as_ref().is_some_and(|entry| entry.file_manager);
+        let codex = matches!(&address, Some(session::StartPage::Agent("codex", _, _)))
+            || entry.as_ref().is_some_and(|entry| entry.codex);
         if file_manager {
             size = rfb::Resolution::FALLBACK;
         }
@@ -1167,8 +1177,11 @@ impl Rectangle {
                     volume,
                     backend,
                     agent_port,
+                    codex,
                     agent_view: if file_manager {
                         AgentView::Files
+                    } else if codex {
+                        AgentView::Codex
                     } else {
                         AgentView::Freebuff
                     },
@@ -1249,6 +1262,7 @@ impl Rectangle {
                     connection: owner.connection.clone(),
                     title: format!("SH Terminal · {}", editor.name),
                     agent_port: Some(port),
+                    codex: owner.codex,
                     agent_view: AgentView::Shell,
                     agent_owner: Some(owner.id),
                     agent_parent_title: Some(owner.title.clone()),
@@ -1300,6 +1314,7 @@ impl Rectangle {
                     connection,
                     title: kind.label().into(),
                     agent_port: Some(port),
+                    codex: owner.codex,
                     agent_view: kind,
                     agent_owner: Some(owner_id),
                     agent_parent_title: Some(owner.title.clone()),
@@ -1794,7 +1809,14 @@ impl Rectangle {
             && port >= 1024
         {
             if draft.image <= 2 {
-                self.launch_agent(ctx, draft.backend, "demo", name, port, draft.image == 2);
+                self.launch_agent(
+                    ctx,
+                    draft.backend,
+                    if draft.codex { "codex" } else { "demo" },
+                    name,
+                    port,
+                    draft.image == 2,
+                );
             } else if let Some(image) = self.agent_images.get(draft.image - 3).cloned() {
                 self.request_with_input(
                     ctx,
@@ -1911,6 +1933,7 @@ impl Rectangle {
                     if ui.button(if draft.image == 0 { "View Dockerfile" } else { "Edit Dockerfile" }).clicked() {
                         draft.dockerfile = Some(match draft.image {
                             0 => images::BROWSER.to_owned(),
+                            1 | 2 if draft.codex => images::CODEX.to_owned(),
                             1 | 2 => images::AGENT.to_owned(),
                             index => self.agent_images[index - 3].dockerfile.clone(),
                         });
@@ -1918,7 +1941,17 @@ impl Rectangle {
                 });
                 if draft.image != 0 {
                     self.suggest_agent_port(ctx, draft);
-                    ui.label(if draft.image == 2 { "Agent workspace in a file explorer" } else { "Alpine terminal with Node.js and Freebuff" });
+                    if draft.image <= 2 {
+                        ui.horizontal(|ui| {
+                            ui.label("Agent app");
+                            let freebuff = ui.selectable_value(&mut draft.codex, false, "Freebuff").changed();
+                            let codex = ui.selectable_value(&mut draft.codex, true, "ChatGPT Codex").changed();
+                            if freebuff || codex {
+                                draft.dockerfile = None;
+                            }
+                        });
+                    }
+                    ui.label(if draft.image == 2 { "Agent workspace in a file explorer" } else if draft.codex { "ChatGPT Codex desktop app · Debian 13" } else { "Alpine terminal with Node.js and Freebuff" });
                     ui.horizontal(|ui| {
                         ui.label("Tab name");
                         ui.add(egui::TextEdit::singleline(&mut draft.name).hint_text("Required"));
@@ -1954,7 +1987,7 @@ impl Rectangle {
                 ui.separator();
                 ui.horizontal(|ui| {
                     let name = if draft.image > 2 { "Build and open" } else { "Open tab" };
-                    let source = match draft.image { 0 => images::BROWSER, 1 | 2 => images::AGENT, index => &self.agent_images[index - 3].dockerfile };
+                    let source = match draft.image { 0 => images::BROWSER, 1 | 2 if draft.codex => images::CODEX, 1 | 2 => images::AGENT, index => &self.agent_images[index - 3].dockerfile };
                     let edits_saved = draft.dockerfile.as_ref().is_none_or(|draft| draft == source);
                     let valid_agent = draft.image == 0 || (saved::title(&draft.name).is_some() && draft.port.trim().parse::<u16>().is_ok_and(|port| port >= 1024));
                     if ui.add_enabled(self.job.is_none() && edits_saved && valid_agent && self.tabs.len() < MAX_TABS, egui::Button::new(name))
@@ -2291,7 +2324,7 @@ impl Rectangle {
                 if let Dialog::Close(id, _) = &dialog {
                     let agent = self.tabs.iter().any(|tab| tab.id == *id && tab.agent_port.is_some());
                     ui.label(if agent {
-                        "Save to Home to keep the Agent workspace and Freebuff data. Park to keep the terminal and port running."
+                        "Save to Home to keep the Agent workspace and app data. Park to keep the app and port running."
                     } else {
                         "Save to Home to keep cookies and site data on the server."
                     });
@@ -3674,6 +3707,13 @@ impl Rectangle {
                 if tab.agent_port.is_some() {
                     for kind in AgentView::ALL
                         .into_iter()
+                        .map(|kind| {
+                            if tab.codex && kind == AgentView::Freebuff {
+                                AgentView::Codex
+                            } else {
+                                kind
+                            }
+                        })
                         .filter(|kind| *kind != tab.agent_view)
                     {
                         if ui
@@ -4348,6 +4388,7 @@ mod tests {
                     .into_iter()
                     .enumerate()
                     .map(|(i, title)| saved::Entry {
+                        codex: false,
                         id: format!("{i:032x}"),
                         title: title.into(),
                         startup_page: String::new(),

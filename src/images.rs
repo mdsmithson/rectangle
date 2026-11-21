@@ -2,6 +2,7 @@ use std::io;
 
 pub const BROWSER: &str = include_str!("../server/Dockerfile");
 pub const AGENT: &str = include_str!("../server/Dockerfile.agent");
+pub const CODEX: &str = include_str!("../server/Dockerfile.codex");
 
 #[derive(Clone)]
 pub struct AgentImage {

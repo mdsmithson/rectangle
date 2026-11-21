@@ -5,6 +5,7 @@ mode=$1
 case $mode in
     sh) display=100; title='SH Terminal'; program=/bin/sh ;;
     freebuff) display=101; title=Freebuff; program=/opt/rectangle/freebuff/freebuff ;;
+    codex) display=101; title='ChatGPT Codex'; program=/usr/lib/chatgpt/codex-launcher ;;
     files) display=102; program= ;;
     edit|edit10[3-9]|edit11[0-9]|edit12[0-7])
         command -v vim >/dev/null || { echo 'Vim is missing. Reopen the Agent with the updated image.' >&2; exit 1; }
@@ -54,9 +55,13 @@ if [ -n "$program" ]; then
     else
         set -- "$program"
     fi
+    if [ "$mode" = codex ]; then
+        dbus-run-session -- "$program" --ozone-platform=x11 --disable-gpu </dev/null >&2 &
+    else
     xterm -fullscreen -fa 'DejaVu Sans Mono' -fs 12 -bg '#0d121a' -fg '#e1e9f0' \
         -xrm 'XTerm*VT100.translations: #override Ctrl <Key>v: insert-selection(CLIPBOARD)' \
         -title "$title" -hold -e "$@" </dev/null >&2 &
+    fi
     terminal=$!
 fi
 socat -t 1 STDIO "UNIX-CONNECT:$lock/rfb,retry=20,interval=1"

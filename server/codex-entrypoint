@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+umask 077
+mkdir -p "$HOME/workspace" "$HOME/.config" "$HOME/.cache" "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+mkdir -m 1777 /tmp/.X11-unix
+export XDG_RUNTIME_DIR=/tmp/rectangle-runtime
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+Xvnc "$DISPLAY" -geometry "${RECTANGLE_WIDTH:-1024}x${RECTANGLE_HEIGHT:-640}" -depth 24 \
+    -nolisten tcp -localhost -rfbport 5900 -SecurityTypes None \
+    -AcceptSetDesktopSize=1 -AcceptCutText=0 -SendCutText=0 </dev/null >&2 &
+display_pid=$!
+for i in $(seq 1 60); do
+    [ ! -S /tmp/.X11-unix/X99 ] || break
+    kill -0 "$display_pid" 2>/dev/null || exit 1
+    sleep .1
+done
+[ -S /tmp/.X11-unix/X99 ]
+cat >/tmp/agent-openbox.xml <<'XML'
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <applications>
+    <application type="normal"><maximized>yes</maximized><decor>no</decor></application>
+    <application type="dialog"><decor>no</decor><position force="no"><x>center</x><y>center</y></position></application>
+  </applications>
+</openbox_config>
+XML
+openbox --config-file /tmp/agent-openbox.xml </dev/null >&2 &
+cd "$HOME/workspace"
+git init -q
+if [ "${RECTANGLE_AGENT_VIEW:-}" = files ]; then
+    while kill -0 "$display_pid" 2>/dev/null; do sleep 5; done
+    exit
+fi
+export BROWSER=firefox-esr
+exec dbus-run-session -- /usr/lib/chatgpt/codex-launcher --ozone-platform=x11 --disable-gpu

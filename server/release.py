@@ -21,6 +21,7 @@ IMAGES = {
                 "rectangle.cfg", "navigation-stream.py", "entrypoint", "audio-stream",
                 "clipboard-stream.py", "memory-stream.py", "demo.html"),
     "agent": ("Dockerfile.agent", "agent-entrypoint", "clipboard-stream.py", "memory-stream.py"),
+    "codex": ("Dockerfile.codex", "codex-entrypoint", "clipboard-stream.py", "memory-stream.py"),
     "egress": ("Dockerfile.egress", "egress.py"),
     "vpn": ("Dockerfile.vpn", "egress.py", "vpn.py"),
     "proton": ("Dockerfile.proton", "egress.py", "proton.py"),
@@ -102,7 +103,7 @@ def activate(source, commit, expected):
     if not SHA.fullmatch(commit) or source_version(source) != expected:
         raise ValueError("The checked-out server source does not match the requested release.")
     server = source / "server"
-    for filename in ("rectangle-session", "rectangle-proton", "agent-view", "release-launcher"):
+    for filename in ("rectangle-session", "rectangle-proton", "agent-view", "release-launcher", "codex-entrypoint"):
         command("sh", "-n", server / filename, timeout=10)
     images = stage_images(server)
     releases = ROOT / "releases"
@@ -117,6 +118,7 @@ def activate(source, commit, expected):
         context.mkdir(mode=0o700)
         for filename in ("agent-entrypoint", "clipboard-stream.py", "memory-stream.py"):
             copy(server / filename, context / filename, 0o600)
+        copy(server / "codex-entrypoint", context / "codex-entrypoint", 0o600)
         (release / "images.sh").write_text("".join(f"rectangle_{name}_image={tag}\n" for name, tag in images.items()))
         (release / "release.json").write_text(json.dumps({"version": expected, "commit": commit}))
         next_link = release / ".activate"

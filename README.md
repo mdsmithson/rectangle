@@ -59,6 +59,12 @@ In **Settings → Connections**, enter your own `user@host` and the path to your
 
 ## Use Rectangle
 
+When creating an **Agent** or **File Manager** tab, choose **Freebuff** or **ChatGPT Codex** under **Agent app**. Codex uses the official Linux desktop app on Debian 13, with its main windows maximized and its dialogs visible. Sign in inside the container and select Codex in the app. Its workspace, app settings, and credentials stay in that Agent’s persistent home directory.
+
+Codex containers include Python, Node.js/npm, Git, and an OpenSSH client. Their selected TCP port follows the existing Agent publishing settings. Services must listen on `0.0.0.0` and use `PORT`. Outbound SSH uses the container’s own `~/.ssh` keys and host verification. Install your own keys through File Manager or SH Terminal. The server and Windows login keys are separate.
+
+The Codex image uses the official x64 Linux package version 26.1117.41037 with a pinned SHA-256. A changed upstream package fails verification until the recipe’s URL and checksum are updated. ARM64 Codex containers require a corresponding verified ARM64 package recipe. Update the server to 0.1.19 before creating a Codex container. Existing Freebuff containers keep their own image and workspace.
+
 In **Settings → Startup → Website theme**, choose **Light**, **Dark**, or **Firefox default** and save. Websites that use `prefers-color-scheme` can follow the selected theme. The setting applies to Browser containers when they start, including reopened saved profiles. Save and reopen an existing Browser tab to apply the change. Parked tabs keep their current theme until you save and reopen them.
 
 Light and Dark require the 0.1.4 or newer server launcher and Browser image. To upgrade, run the server installer with your existing install mode before selecting either theme.

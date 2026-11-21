@@ -39,6 +39,7 @@ assets=${RECTANGLE_RELEASE_DIR:-$config}
 proton_helper="$HOME/.local/bin/rectangle-proton"
 rectangle_browser_image=rectangle-browser:demo
 rectangle_agent_image=rectangle-agent:demo
+rectangle_codex_image=rectangle-codex:demo
 rectangle_vpn_image=rectangle-vpn:demo
 rectangle_egress_image=rectangle-egress:demo
 if [ -n "${RECTANGLE_RELEASE_DIR:-}" ]; then
@@ -203,6 +204,7 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
             case $layout in left|right|tl|tr|bl|br) ;; *) layout=- ;; esac
             if [ "$layout" != - ] || [ -n "$agent_port" ]; then printf ' %s' "$layout"; fi
             if [ -n "$agent_port" ]; then printf ' %s' "$agent_port"; fi
+            if [ -n "$agent_port" ] && [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-flavor"}}' "rectangle-tab-$id")" = codex ]; then printf ' codex'; fi
             if [ -n "$always_on" ] && [ -n "$agent_port" ]; then printf ' %s' "$always_on"; fi
             if [ -n "$agent_port" ] && [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-view"}}' "rectangle-tab-$id")" = files ]; then
                 printf ' files'
@@ -388,7 +390,10 @@ EOF
             if [ "$role" = agent ]; then
                 agent_image=$(docker inspect -f '{{.Config.Image}}' "$container")
                 port=$(docker inspect -f '{{index .Config.Labels "rectangle.agent-port"}}' "$container")
-                case $agent_image in rectangle-agent:build-*) agent_image=rectangle-agent:demo ;; esac
+                case $agent_image in
+                    rectangle-agent:build-*) agent_image=rectangle-agent:demo ;;
+                    rectangle-codex:*) agent_image=rectangle-agent:codex ;;
+                esac
                 page="agent:${agent_image#rectangle-agent:}:$port"
                 if [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-view"}}' "$container")" = files ]; then
                     page="$page:files"
@@ -509,7 +514,7 @@ EOF
             agent-cwd)
                 [ -z "$path$file$size$extra" ] || exit 1
                 case $action in
-                    main) display=99 ;; sh) display=100 ;; freebuff) display=101 ;;
+                    main) display=99 ;; sh) display=100 ;; freebuff|codex) display=101 ;;
                     edit10[3-9]|edit11[0-9]|edit12[0-7]) display=${action#edit} ;;
                     *) exit 1 ;;
                 esac
@@ -517,14 +522,14 @@ EOF
             agent-clipboard)
                 [ -z "$path$file$size$extra" ] || exit 1
                 case $action in
-                    sh) display=100 ;; freebuff) display=101 ;; edit) display=103 ;;
+                    sh) display=100 ;; freebuff|codex) display=101 ;; edit) display=103 ;;
                     edit10[3-9]|edit11[0-9]|edit12[0-7]) display=${action#edit} ;;
                     *) exit 1 ;;
                 esac
                 exec docker exec -i -e "DISPLAY=:$display" "$name" python3 -I /opt/rectangle/clipboard-stream.py ;;
             agent-view)
                 case $action in
-                    sh|freebuff|files)
+                    sh|freebuff|codex|files)
                         [ -z "$path" ] || exit 1
                         exec docker exec -i "$name" sh -c "$(cat "$assets/agent-view")" agent-view "$action" ;;
                     edit|edit10[3-9]|edit11[0-9]|edit12[0-7])
@@ -753,8 +758,11 @@ parse_agent() {
     case $agent_port in ''|0*|*[!0-9]*) bad_resolution ;; esac
     [ "${#agent_port}" -le 5 ] && [ "$agent_port" -ge 1024 ] && [ "$agent_port" -le 65535 ] ||
         { echo 'Choose an Agent port from 1024 to 65535.' >&2; exit 1; }
-    if [ "$image_id" != demo ]; then valid_token "$image_id" || bad_resolution; fi
-    if [ "$image_id" = demo ]; then image=$rectangle_agent_image; else image="rectangle-agent:$image_id"; fi
+    case $image_id in
+        demo) image=$rectangle_agent_image ;;
+        codex) image=$rectangle_codex_image ;;
+        *) valid_token "$image_id" || bad_resolution; image="rectangle-agent:$image_id" ;;
+    esac
 }
 case $requested in
     *' '*)
@@ -993,6 +1001,7 @@ except OSError as err:
     network_mode=bridge
     set -- "$@" --publish "$bind_ip:$agent_port:$agent_port/tcp" \
         --label "rectangle.agent-port=$agent_port" --env "PORT=$agent_port" \
+        --label "rectangle.agent-flavor=$image_id" \
         --label "rectangle.agent-view=$agent_view" --env "RECTANGLE_AGENT_VIEW=$agent_view" \
         --label rectangle.agent-storage=volume --env HOME=/agent/home \
         --tmpfs /run/freebuff-tmp:rw,nosuid,nodev,exec,size=128m,mode=0700,uid=10001,gid=10001 \
