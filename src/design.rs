@@ -38,47 +38,17 @@ pub fn theme(ctx: &egui::Context) {
     }
 }
 
-fn hash(x: i32, y: i32) -> f32 {
-    let mut v = (x as u32).wrapping_mul(0x6d2b79f5) ^ (y as u32).wrapping_mul(0x27d4eb2d);
-    v ^= v >> 15;
-    v = v.wrapping_mul(0x85ebca6b);
-    v ^= v >> 13;
-    (v & 65535) as f32 / 65535.0
-}
-
-fn noise(x: f32, y: f32) -> f32 {
-    let (i, j) = (x.floor() as i32, y.floor() as i32);
-    let smooth = |v: f32| v * v * (3.0 - 2.0 * v);
-    let (a, b) = (smooth(x - x.floor()), smooth(y - y.floor()));
-    let mix = |x, y, t| x + (y - x) * t;
-    mix(
-        mix(hash(i, j), hash(i + 1, j), a),
-        mix(hash(i, j + 1), hash(i + 1, j + 1), a),
-        b,
-    )
-}
-
-fn stone(x: f32, y: f32) -> Color32 {
-    let warp = noise(x * 3.1 + 3.0, y * 3.1) * 0.62
-        + noise(x * 7.1, y * 7.1) * 0.22
-        + noise(x * 16.0, y * 16.0) * 0.06;
-    let path = x * 0.79 + y * 1.5 + warp - 0.23;
-    let ridge = ((path * std::f32::consts::TAU * 1.45).sin()).abs();
-    let vein = (1.0 - ridge).powi(35) * 29.0 + (1.0 - ridge).powi(6) * 11.0;
-    let glint = (1.0 - ((x - 0.21) * 0.8 + y * 1.65).abs()).max(0.0).powi(3) * 17.0;
-    let grain = noise(x * 219.0, y * 219.0) * 3.0;
-    let base = (9.0 + glint + noise(x * 5.0, y * 5.0) * 8.0 + vein + grain) as u8;
-    Color32::from_rgb(base, base + 1, base + 4)
-}
-
 pub fn marble(ctx: &egui::Context) -> egui::TextureHandle {
-    let (w, h) = (768, 512);
-    let pixels = (0..h)
-        .flat_map(|y| (0..w).map(move |x| stone(x as f32 / w as f32, y as f32 / h as f32)))
-        .collect();
+    use std::io::Read;
+    let mut pixels = Vec::with_capacity(768 * 512 * 4);
+    flate2::read::ZlibDecoder::new(
+        &include_bytes!(concat!(env!("OUT_DIR"), "/marble.rgba.zlib"))[..],
+    )
+    .read_to_end(&mut pixels)
+    .expect("build-generated marble texture");
     ctx.load_texture(
         "Rectangle black marble",
-        egui::ColorImage::new([w, h], pixels),
+        egui::ColorImage::from_rgba_unmultiplied([768, 512], &pixels),
         egui::TextureOptions::LINEAR,
     )
 }

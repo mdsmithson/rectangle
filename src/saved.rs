@@ -188,46 +188,103 @@ pub fn run_with_input(
     if input.is_none() {
         cmd.stdin(std::process::Stdio::null());
     }
-    let mut child = cmd.spawn()?;
+    run_command(cmd, input, repaint)
+}
+
+fn run_command(
+    mut cmd: std::process::Command,
+    input: Option<Vec<u8>>,
+    repaint: impl FnOnce() + Send + 'static,
+) -> io::Result<Receiver<io::Result<String>>> {
     let (send, receive) = mpsc::channel();
-    thread::spawn(move || {
-        let mut stderr = child.stderr.take().unwrap().take(4096);
-        let diagnostic = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stderr.read_to_end(&mut bytes);
-            String::from_utf8_lossy(&bytes).trim().to_owned()
-        });
-        let mut data = String::new();
-        let result = (|| {
-            if let Some(input) = input {
-                child.stdin.take().unwrap().write_all(&input)?;
-            }
-            child
-                .stdout
-                .take()
-                .unwrap()
-                .take(110_001)
-                .read_to_string(&mut data)?;
-            if data.len() > 110_000 {
-                return Err(io::Error::other("Saved session response too large"));
-            }
-            if child.wait()?.success() {
-                Ok(data)
-            } else {
-                let error = diagnostic.join().unwrap_or_default();
-                Err(io::Error::other(if error.is_empty() {
-                    "Saved session request failed".into()
+    thread::Builder::new()
+        .name("rectangle-request".into())
+        .spawn(move || {
+            // Creating ssh.exe can wait on Windows security scans. Keep process
+            // creation off the UI thread as well as the connection and response.
+            let mut child = match cmd.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    let _ = send.send(Err(error));
+                    repaint();
+                    return;
+                }
+            };
+            let mut stderr = child.stderr.take().unwrap().take(4096);
+            let diagnostic = thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = stderr.read_to_end(&mut bytes);
+                String::from_utf8_lossy(&bytes).trim().to_owned()
+            });
+            let mut data = String::new();
+            let result = (|| {
+                if let Some(input) = input {
+                    child.stdin.take().unwrap().write_all(&input)?;
+                }
+                child
+                    .stdout
+                    .take()
+                    .unwrap()
+                    .take(110_001)
+                    .read_to_string(&mut data)?;
+                if data.len() > 110_000 {
+                    return Err(io::Error::other("Saved session response too large"));
+                }
+                if child.wait()?.success() {
+                    Ok(data)
                 } else {
-                    error
-                }))
+                    let error = diagnostic.join().unwrap_or_default();
+                    Err(io::Error::other(if error.is_empty() {
+                        "Saved session request failed".into()
+                    } else {
+                        error
+                    }))
+                }
+            })();
+            if result.is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
             }
-        })();
-        if result.is_err() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        let _ = send.send(result);
-        repaint();
-    });
+            let _ = send.send(result);
+            repaint();
+        })?;
     Ok(receive)
+}
+
+#[test]
+fn request_reports_process_creation_failure_and_repaints() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let repainted = Arc::new(AtomicBool::new(false));
+    let signal = repainted.clone();
+    let command = std::process::Command::new("rectangle-missing-ssh-test-executable");
+    let task = run_command(command, None, move || signal.store(true, Ordering::Release)).unwrap();
+    assert_eq!(
+        task.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !repainted.load(Ordering::Acquire) {
+        assert!(std::time::Instant::now() < deadline);
+        thread::yield_now();
+    }
+    assert!(run("-invalid-host", None, "list-v2", || {}).is_err());
+}
+
+#[test]
+#[ignore = "requires a live Rectangle host and SSH key"]
+fn background_requests_read_the_host_library_and_status() {
+    let host = std::env::var("RECTANGLE_SMOKE_HOST").unwrap();
+    let key = std::env::var_os("RECTANGLE_SMOKE_IDENTITY").map(std::path::PathBuf::from);
+    let library = run(&host, key.as_deref(), "list-v2", || {}).unwrap();
+    let status = run(&host, key.as_deref(), "proton-status", || {}).unwrap();
+    let timeout = std::time::Duration::from_secs(20);
+    parse(&library.recv_timeout(timeout).unwrap().unwrap()).unwrap();
+    let response = status.recv_timeout(timeout).unwrap().unwrap();
+    assert!(response.starts_with("RECTPROTON1\n"));
 }

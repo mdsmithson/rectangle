@@ -1,5 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[cfg(test)]
+mod artwork;
 mod audio;
 mod clipboard;
 mod design;
@@ -426,7 +428,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1120.0, 790.0])
             .with_min_inner_size([640.0, 420.0])
             .with_icon(egui::IconData {
-                rgba: mark::icon(64),
+                rgba: include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba")).to_vec(),
                 width: 64,
                 height: 64,
             }),
@@ -453,6 +455,24 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[test]
+#[ignore = "startup performance measurement"]
+fn startup_artwork_timing() {
+    let ctx = egui::Context::default();
+    for _ in 0..5 {
+        let start = Instant::now();
+        std::hint::black_box(include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba")).to_vec());
+        let icon = start.elapsed();
+        let start = Instant::now();
+        let _ = std::hint::black_box(design::marble(&ctx));
+        println!(
+            "icon_ms={:.3} background_ms={:.3}",
+            icon.as_secs_f64() * 1000.0,
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }
 
 impl Tab {
@@ -4520,4 +4540,20 @@ mod tests {
         app.close_tab(0);
         assert!(app.tabs.is_empty());
     }
+}
+
+#[test]
+fn embedded_artwork_matches_the_generated_pixels() {
+    use std::io::Read;
+    let mut marble = Vec::new();
+    flate2::read::ZlibDecoder::new(
+        &include_bytes!(concat!(env!("OUT_DIR"), "/marble.rgba.zlib"))[..],
+    )
+    .read_to_end(&mut marble)
+    .unwrap();
+    assert_eq!(marble, artwork::marble());
+    assert_eq!(
+        &include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba"))[..],
+        artwork::icon(64)
+    );
 }

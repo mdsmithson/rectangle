@@ -1,15 +1,23 @@
+#[path = "src/artwork.rs"]
+mod artwork;
+
 #[path = "src/mark.rs"]
 mod mark;
 
 fn main() {
+    use std::{fs, io::Write, path::PathBuf, process::Command};
     println!("cargo:rerun-if-changed=src/mark.rs");
+    println!("cargo:rerun-if-changed=src/artwork.rs");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    fs::write(out.join("icon.rgba"), artwork::icon(64)).unwrap();
+    let mut texture = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    texture.write_all(&artwork::marble()).unwrap();
+    fs::write(out.join("marble.rgba.zlib"), texture.finish().unwrap()).unwrap();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
         || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
     {
         return;
     }
-    use std::{fs, path::PathBuf, process::Command};
-    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let mut images = Vec::new();
     for size in [16_u32, 32, 48, 64, 128] {
         let mut dib = Vec::new();
@@ -19,7 +27,7 @@ fn main() {
         dib.extend(1_u16.to_le_bytes());
         dib.extend(32_u16.to_le_bytes());
         dib.extend([0_u8; 24]);
-        let rgba = mark::icon(size);
+        let rgba = artwork::icon(size);
         for row in rgba.chunks_exact(size as usize * 4).rev() {
             for p in row.chunks_exact(4) {
                 dib.extend([p[2], p[1], p[0], p[3]]);
