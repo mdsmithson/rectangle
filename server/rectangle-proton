@@ -1,5 +1,5 @@
 #!/bin/sh
-# Administrative launcher; not exposed through the restricted Rectangle SSH key.
+# Fixed VPN management operations for the host and restricted Rectangle client.
 set -eu
 umask 077
 dir="$HOME/.config/rectangle/proton"
@@ -8,6 +8,7 @@ if [ -n "${RECTANGLE_RELEASE_DIR:-}" ]; then
     . "$RECTANGLE_RELEASE_DIR/images.sh"
 fi
 name=rectangle-proton
+restarting=false
 is_gateway() {
     [ "$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "$name" 2>/dev/null)" = proton ]
 }
@@ -102,6 +103,10 @@ case ${1:-start} in
         docker stop "$name" >/dev/null
         exit
         ;;
+    restart)
+        lock
+        [ ! -f "$HOME/.config/rectangle/offline" ] || { echo 'This host is set to offline mode.' >&2; exit 1; }
+        restarting=true ;;
     start) ;;
     *) exit 2 ;;
 esac
@@ -110,13 +115,21 @@ esac
 [ -f "$dir/resolv.conf" ] && [ -s "$dir/resolv.conf" ] && [ ! -L "$dir/resolv.conf" ] &&
     [ "$(stat -c %a -- "$dir/resolv.conf")" = 644 ] || { echo 'Proton resolv.conf must be readable by the proxy (mode 644).' >&2; exit 1; }
 mkdir -p -m 0733 "$dir/socket"
+if [ "$restarting" = true ]; then
+    describe < "$dir/client.conf" >/dev/null
+    docker image inspect "$rectangle_proton_image" >/dev/null
+    if docker inspect "$name" >/dev/null 2>&1; then
+        is_gateway || { echo 'The Proton container name belongs to another service.' >&2; exit 1; }
+        docker rm -f "$name" >/dev/null
+    fi
+fi
 if docker inspect "$name" >/dev/null 2>&1; then
     [ "$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "$name")" = proton ] || exit 1
     docker start "$name" >/dev/null
 else
     docker run --detach --init --pull=never --name "$name" --restart unless-stopped \
         --label rectangle.role=proton --network bridge --read-only \
-        --device /dev/net/tun --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE \
+        --device-cgroup-rule 'c 10:200 rwm' --cap-drop ALL --cap-add MKNOD --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE \
         --security-opt no-new-privileges --memory 256m --cpus 1 --pids-limit 64 \
         --tmpfs /run/wireguard:rw,nosuid,nodev,noexec,size=1m,mode=0700 \
         --log-driver local --log-opt max-size=1m --log-opt max-file=1 --log-opt compress=false \
@@ -130,3 +143,12 @@ while [ ! -S "$dir/socket/egress.sock" ]; do
     i=$((i + 1)); [ "$i" -lt 60 ] || { echo 'The Proton gateway did not start.' >&2; exit 1; }
     sleep 0.2
 done
+if [ "$restarting" = true ]; then
+    i=0
+    while [ "$i" -lt 8 ]; do
+        if active; then printf 'OK\n'; exit 0; fi
+        i=$((i + 1)); sleep 1
+    done
+    echo 'The Proton gateway restarted, but its VPN HTTPS health check failed. Check the host network and Proton profile.' >&2
+    exit 1
+fi

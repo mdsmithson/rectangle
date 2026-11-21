@@ -18,6 +18,7 @@ pub struct Proton {
     next: Option<Instant>,
     status_job: Option<Task>,
     config_job: Option<(bool, Task)>,
+    restart_job: Option<Task>,
     summary: Option<String>,
     message: Option<(bool, String)>,
     path: String,
@@ -27,6 +28,23 @@ impl Proton {
     pub fn tick(&mut self, ctx: &egui::Context, host: &str, key: Option<&Path>) {
         if host.is_empty() {
             return;
+        }
+        if let Some(result) = take(&mut self.restart_job) {
+            self.message = Some(
+                match result.and_then(|data| {
+                    (data.trim() == "OK").then_some(()).ok_or_else(|| {
+                        io::Error::other("The server did not confirm the VPN restart.")
+                    })
+                }) {
+                    Ok(()) => (
+                        true,
+                        "Proton VPN restarted and its HTTPS health check passed.".into(),
+                    ),
+                    Err(error) => (false, error.to_string()),
+                },
+            );
+            self.status_job = None;
+            self.next = None;
         }
         if let Some(result) = take(&mut self.status_job) {
             self.state = Some(
@@ -90,6 +108,8 @@ impl Proton {
     pub fn badge(&self, ui: &mut egui::Ui, configured: bool) {
         let state = if !configured {
             "Inactive"
+        } else if self.restart_job.is_some() {
+            "Restarting"
         } else if self
             .config_job
             .as_ref()
@@ -159,7 +179,28 @@ impl Proton {
             return;
         }
         ui.label(format!("Configuration on {host}"));
-        let busy = self.config_job.is_some();
+        let busy = self.config_job.is_some() || self.restart_job.is_some();
+        if ui
+            .add_enabled(!busy, egui::Button::new("Restart VPN"))
+            .on_hover_text("Restart the shared gateway using its installed Proton profile.")
+            .clicked()
+        {
+            self.message = None;
+            let repaint = ui.ctx().clone();
+            match saved::run(host, key, "proton-restart", move || {
+                repaint.request_repaint()
+            }) {
+                Ok(task) => self.restart_job = Some(task),
+                Err(error) => self.message = Some((false, error.to_string())),
+            }
+        }
+        ui.label(
+            egui::RichText::new(
+                "Restarting briefly interrupts VPN browsing for all tabs on this server.",
+            )
+            .small()
+            .color(crate::MUTED),
+        );
         if ui
             .add_enabled(!busy, egui::Button::new("View current config"))
             .clicked()

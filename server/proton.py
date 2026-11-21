@@ -5,12 +5,31 @@ import ipaddress
 import os
 from pathlib import Path
 import subprocess
+import stat
 import sys
 import time
 
 MARK = 0x5243
 PORT = 51821
 SOCKET = Path("/run/rectangle/egress.sock")
+
+
+def prepare_tun():
+    # /dev is container-local. Opening this device can autoload the host TUN
+    # driver without requiring a host /dev/net/tun mount at Docker startup.
+    device = Path("/dev/net/tun")
+    device.parent.mkdir(exist_ok=True)
+    try:
+        os.mknod(device, stat.S_IFCHR | 0o600, os.makedev(10, 200))
+    except FileExistsError:
+        info = device.lstat()
+        if not stat.S_ISCHR(info.st_mode) or info.st_rdev != os.makedev(10, 200):
+            sys.exit("Rectangle Proton: unexpected TUN device")
+    try:
+        descriptor = os.open(device, os.O_RDWR | os.O_NOFOLLOW)
+        os.close(descriptor)
+    except OSError:
+        sys.exit("Rectangle Proton: cannot open TUN; verify the gateway device permissions and host TUN driver")
 
 
 def profile(source):
@@ -89,6 +108,7 @@ def main():
     if actual != expected:
         sys.exit("Rectangle Proton: unexpected DNS resolver configuration")
     os.umask(0o077)
+    prepare_tun()
     SOCKET.unlink(missing_ok=True)
     run = lambda *argv, **kw: subprocess.run(argv, check=True, **kw)
     run("nft", "-f", "-", input=firewall(endpoint, port), text=True)

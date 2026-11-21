@@ -323,6 +323,7 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
         exec /bin/setpriv --no-new-privs ncdu -rr / ;;
     proton-status) exec "$proton_helper" status ;;
     proton-view) exec "$proton_helper" view ;;
+    proton-restart) exec "$proton_helper" restart ;;
     proton-replace)
         [ -f "$config/allow-vpn-changes" ] || {
             echo 'Remote VPN changes are disabled by the server owner.' >&2

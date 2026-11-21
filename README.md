@@ -95,6 +95,8 @@ Light and Dark require the 0.1.4 or newer server launcher and Browser image. To 
 
 ## Optional VPN setup
 
+In **Settings → Proton VPN**, use **Restart VPN** to recreate the shared gateway with its installed profile. Rectangle confirms success after a VPN-routed HTTPS check. This requires the 0.1.22 server release. Restart once after upgrading an older gateway to apply the new boot-safe TUN configuration. The gateway creates its TUN device inside the container, so Docker can start it after a host reboot even when the host’s `/dev/net/tun` has not been created yet. Offline mode and an absent profile are reported as errors. A restart briefly interrupts VPN browsing on that server.
+
 ### Proton VPN Free
 
 The top-right **Proton VPN** badge checks for a VPN route and an HTTPS handshake from inside the gateway. Open **Settings → Proton VPN** to view the endpoint, tunnel address, DNS and routing without exposing private keys. To change the config, enter the path to a downloaded Proton GNU/Linux WireGuard `.conf` file and select **Apply new config**. Rectangle sends it over SSH, validates it before restarting the shared gateway, and restores the previous config if the replacement does not connect. To allow changes from the client, the server owner must create `~/.config/rectangle/allow-vpn-changes`.
