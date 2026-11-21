@@ -22,6 +22,10 @@ pub fn window_path() -> io::Result<PathBuf> {
     Ok(path()?.with_file_name("window.ron"))
 }
 
+pub fn workspace_path() -> io::Result<PathBuf> {
+    Ok(path()?.with_file_name("workspace.ron"))
+}
+
 pub fn tab_volume(host: &str, id: &str) -> Option<u8> {
     let data = fs::read_to_string(path().ok()?.with_file_name("tab-volumes.txt")).ok()?;
     let prefix = format!("{host} {id} ");

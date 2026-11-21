@@ -1985,13 +1985,15 @@ dependencies = [
 
 [[package]]
 name = "rectangle"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "eframe",
  "flate2",
  "getrandom 0.3.4",
  "image",
  "pollster",
+ "ron",
+ "serde",
  "url",
  "windows-sys 0.61.2",
 ]

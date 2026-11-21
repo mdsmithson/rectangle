@@ -23,6 +23,7 @@ mod startup;
 mod terminal;
 mod tiling;
 mod update;
+mod workspace;
 use tiling::Snap;
 
 use eframe::egui::{self, Color32, Event, Key, PointerButton, Pos2, Rect, RichText, Sense, Vec2};
@@ -38,6 +39,7 @@ const IDLE_MESSAGE: &str = "Container stopped after 30 minutes of inactivity.";
 
 #[derive(Default)]
 struct Rectangle {
+    workspace_state: workspace::State,
     preference_writes: preferences::Writes,
     agent_images: Vec<images::AgentImage>,
     dragging_tab: Option<u64>,
@@ -246,7 +248,7 @@ enum Job {
     ParkedList(Backend),
     OpenSaved(Backend, saved::Entry, Option<Snap>),
     PrepareAgentMedia(Backend, saved::Entry, Option<Snap>),
-    Park(u64, Backend),
+    Park(u64, Backend, bool),
     StopParked(Backend),
     Close(u64, Backend),
     IdleSave(u64, Backend),
@@ -361,6 +363,7 @@ struct NewTab {
 
 #[derive(Default)]
 struct Tab {
+    editor_file: Option<(String, String)>,
     preferences: preferences::State,
     navigation: Option<navigation::Navigation>,
     page_rect: Option<Rect>,
@@ -444,6 +447,13 @@ fn main() -> eframe::Result {
             error.or_else(|| Some(format!("Could not load Agent images: {err}"))),
         ),
     };
+    let (workspace_state, error) = match workspace::State::load() {
+        Ok(state) => (state, error),
+        Err(problem) => (
+            workspace::State::default(),
+            error.or_else(|| Some(format!("Could not restore the workspace: {problem}"))),
+        ),
+    };
     launch_trace::checkpoint("settings-loaded");
     let mut options = eframe::NativeOptions {
         persistence_path: settings::window_path().ok(),
@@ -466,6 +476,7 @@ fn main() -> eframe::Result {
             launch_trace::checkpoint("graphics-ready");
             design::theme(&cc.egui_ctx);
             let mut app = Rectangle {
+                workspace_state,
                 marble: Some(design::marble(&cc.egui_ctx)),
                 host,
                 identity,
@@ -478,6 +489,12 @@ fn main() -> eframe::Result {
                 ..Default::default()
             };
             launch_trace::checkpoint("artwork-ready");
+            if let Some(layout) = &app.workspace_state.layout {
+                if !app.secondary.host.is_empty() && layout.library_host == app.secondary.host {
+                    app.library_host = Backend::Secondary;
+                }
+                app.home = layout.home;
+            }
             app.find_parked_on_startup(&cc.egui_ctx);
             launch_trace::checkpoint("app-ready");
             Ok(Box::new(app))
@@ -948,7 +965,9 @@ impl Rectangle {
             }
         }
         self.tabs[index].snap = snap;
-        self.select_tab(index);
+        if !self.workspace_state.applying {
+            self.select_tab(index);
+        }
     }
 
     fn place_new_tab(&mut self, count: usize, slot: Option<Snap>) {
@@ -1012,6 +1031,10 @@ impl Rectangle {
         backend: Backend,
         result: startup::Snapshot,
     ) {
+        let restore = self.workspace_state.layout.is_some();
+        let available = result.entries.is_some() && result.parked.is_some();
+        let workspace_entries = result.entries.clone().unwrap_or_default();
+        let workspace_parked = result.parked.clone().unwrap_or_default();
         let mut errors: Vec<_> = result
             .errors
             .into_iter()
@@ -1028,17 +1051,28 @@ impl Rectangle {
             self.library_loaded = Some(backend);
             self.parked = result.parked.clone().unwrap_or_default();
         }
-        // A slow second host must not delay this one or take focus away from a
-        // tab the user is already working in when its own results arrive later.
-        let focus = self.tabs.is_empty();
-        let mut parked = result.parked.unwrap_or_default();
-        parked.sort_by_key(|entry| (entry.expires, entry.token.clone()));
-        for entry in parked {
-            self.resume_parked_with_focus(ctx, backend, entry, focus);
+        if restore {
+            self.restore_workspace_host(
+                ctx,
+                backend,
+                &workspace_entries,
+                &workspace_parked,
+                available,
+            );
             errors.extend(self.error.take());
-        }
-        if focus && let Some(index) = self.tabs.iter().position(|tab| tab.snap.is_some()) {
-            self.select_tab(index);
+        } else {
+            // A slow second host must not delay this one or take focus away from a
+            // tab the user is already working in when its own results arrive later.
+            let focus = self.tabs.is_empty();
+            let mut parked = result.parked.unwrap_or_default();
+            parked.sort_by_key(|entry| (entry.expires, entry.token.clone()));
+            for entry in parked {
+                self.resume_parked_with_focus(ctx, backend, entry, focus);
+                errors.extend(self.error.take());
+            }
+            if focus && let Some(index) = self.tabs.iter().position(|tab| tab.snap.is_some()) {
+                self.select_tab(index);
+            }
         }
         if !errors.is_empty() {
             self.error = Some(errors.join("\n"));
@@ -1046,6 +1080,13 @@ impl Rectangle {
     }
 
     fn resume_parked(&mut self, ctx: &egui::Context, backend: Backend, entry: saved::Parked) {
+        self.unminimize_workspace(
+            &self.connection(backend).host,
+            entry.profile.as_deref().unwrap_or(&entry.token),
+        );
+        if !self.workspace_state.applying {
+            self.workspace_state.focus_pending = false;
+        }
         self.resume_parked_with_focus(ctx, backend, entry, true);
     }
 
@@ -1329,8 +1370,16 @@ impl Rectangle {
                     started: Some(Instant::now()),
                     ..Default::default()
                 });
-                self.active = self.tabs.len() - 1;
-                self.home = false;
+                if !self.workspace_state.applying {
+                    self.active = self.tabs.len() - 1;
+                    self.home = false;
+                    self.workspace_state.focus_pending = false;
+                }
+                if let Some(tab) = self.tabs.last()
+                    && let Some(key) = self.workspace_key(tab)
+                {
+                    self.unminimize_workspace(&key.host, &key.profile);
+                }
                 self.error = None;
                 ctx.request_repaint();
             }
@@ -1339,6 +1388,12 @@ impl Rectangle {
     }
 
     fn close_tab(&mut self, index: usize) {
+        if !self.quitting
+            && let Some(key) = self.workspace_key(&self.tabs[index])
+        {
+            self.workspace_state
+                .closed(&key, self.tabs[index].agent_owner.is_none());
+        }
         let closed = self.tabs[index].id;
         let active = self.tabs.get(self.active).map(|tab| tab.id);
         self.tabs
@@ -1363,6 +1418,7 @@ impl Rectangle {
     }
 
     fn open_file_editor(&mut self, ctx: &egui::Context, index: usize, editor: files::FileEditor) {
+        let preferred_display = self.workspace_state.editor_display.take();
         let owner = &self.tabs[self.agent_owner_index(index)];
         if self.tabs.len() >= MAX_TABS {
             self.error = Some("Close a tab before opening Vim.".into());
@@ -1371,13 +1427,17 @@ impl Rectangle {
         let (Some(session), Some(port)) = (&owner.session, owner.agent_port) else {
             return;
         };
-        let Some(display) = (103..=127).find(|display| {
+        let available = |display: &u16| {
             !self.tabs.iter().any(|tab| {
                 tab.agent_owner == Some(owner.id)
                     && tab.file_editor == Some(*display)
                     && tab.session.is_some()
             })
-        }) else {
+        };
+        let Some(display) = preferred_display
+            .filter(|display| (103..=127).contains(display) && available(display))
+            .or_else(|| (103..=127).find(available))
+        else {
             self.error =
                 Some("Close a Vim tab before opening another editor for this Agent.".into());
             return;
@@ -1405,6 +1465,7 @@ impl Rectangle {
                     agent_owner: Some(owner.id),
                     agent_parent_title: Some(owner.title.clone()),
                     file_editor: Some(display),
+                    editor_file: Some((editor.directory.clone(), editor.name.clone())),
                     always_on: owner.always_on,
                     session: Some(session),
                     started: Some(Instant::now()),
@@ -1474,6 +1535,9 @@ impl Rectangle {
     }
 
     fn select_tab(&mut self, index: usize) {
+        if !self.workspace_state.applying {
+            self.workspace_state.focus_pending = false;
+        }
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.blur();
         }
@@ -1564,6 +1628,14 @@ impl Rectangle {
             }
         };
         let (job, _) = self.job.take().unwrap();
+        let previous_applying = self.workspace_state.applying;
+        if let Job::PrepareAgentMedia(backend, entry, _) = &job
+            && self
+                .workspace_state
+                .is_opening(&self.connection(*backend).host, &entry.id)
+        {
+            self.workspace_state.applying = true;
+        }
         let idle_id = match &job {
             Job::IdleSave(id, _) => Some(*id),
             _ => None,
@@ -1733,17 +1805,19 @@ impl Rectangle {
                         }
                     })
             }
-            Job::Park(id, backend) => result.and_then(|data| {
+            Job::Park(id, backend, minimized) => result.and_then(|data| {
                 if data.trim() != "OK" {
                     return Err(std::io::Error::other("The host did not confirm parking."));
                 }
                 if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+                    if minimized {
+                        self.remember_minimized(index);
+                    }
                     self.close_tab(index);
                 }
                 if self.quitting {
                     ctx.request_repaint();
                 } else {
-                    self.home = true;
                     self.library_host = backend;
                     self.parked.clear();
                     self.refresh(ctx);
@@ -1836,6 +1910,7 @@ impl Rectangle {
             self.error = Some(error.to_string());
             self.quitting = false;
         }
+        self.workspace_state.applying = previous_applying;
     }
 
     fn park_tab(&mut self, ctx: &egui::Context, index: usize) {
@@ -1852,11 +1927,14 @@ impl Rectangle {
             );
             let (id, backend) = (tab.id, tab.backend);
             tab.blur();
-            self.request(ctx, Job::Park(id, backend), backend, &cmd);
+            self.request(ctx, Job::Park(id, backend, !self.quitting), backend, &cmd);
         }
     }
 
     fn park_on_quit(&mut self, ctx: &egui::Context) {
+        if !self.workspace_state.frozen {
+            self.freeze_workspace();
+        }
         if self.job.is_some() || self.preference_writes.pending() {
             return;
         }
@@ -2646,6 +2724,10 @@ impl eframe::App for Rectangle {
         ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
             self.workspace(ui)
         });
+        if !self.quitting {
+            self.workspace_state.frozen = false;
+            self.persist_workspace();
+        }
     }
 }
 
@@ -2902,6 +2984,7 @@ impl Rectangle {
         }
         if !ui.input(|i| i.viewport().close_requested()) && !self.quitting {
             self.poll_startup(&ctx);
+            self.restore_workspace_tick(&ctx);
         }
         if ui.input(|input| input.viewport().close_requested())
             && (!self.tabs.is_empty() || self.preference_writes.pending())
@@ -3174,6 +3257,7 @@ impl Rectangle {
                 ));
             }
             if home {
+                self.workspace_state.focus_pending = false;
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.blur();
                 }
@@ -3700,21 +3784,38 @@ impl Rectangle {
             .painter()
             .layout_no_wrap(label.clone(), font.clone(), INK);
         let browser = tab.agent_port.is_none();
-        let width = (text.size().x + if browser { 118.0 } else { 46.0 }).min(288.0);
+        let width = (text.size().x + if browser { 142.0 } else { 70.0 }).min(312.0);
         let width = if ui.layout().is_horizontal() {
             width
         } else {
-            width.min(ui.available_width().max(45.0))
+            width.min(ui.available_width().max(70.0))
         };
         let (_, outer) = ui.allocate_space(Vec2::new(width, 29.0));
         let close_rect = Rect::from_center_size(
             Pos2::new(outer.right() - 15.0, outer.center().y),
             Vec2::splat(22.0),
         );
-        let controls_width = if browser && width >= 118.0 { 69.0 } else { 0.0 };
+        let minimize_rect = close_rect.translate(Vec2::new(-24.0, 0.0));
+        let can_minimize = tab.ran && tab.session.is_some() && ready;
+        let minimize = ui
+            .interact(
+                minimize_rect,
+                ui.make_persistent_id((tab.id, "tab minimize")),
+                if can_minimize {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                },
+            )
+            .on_hover_text(if tab.agent_port.is_some() {
+                "Minimize and park this Agent and its linked views"
+            } else {
+                "Minimize and park this tab"
+            });
+        let controls_width = if browser && width >= 142.0 { 69.0 } else { 0.0 };
         let name_rect = Rect::from_min_max(
             outer.min + Vec2::new(controls_width, 0.0),
-            Pos2::new(close_rect.left() - 3.0, outer.bottom()),
+            Pos2::new(minimize_rect.left() - 3.0, outer.bottom()),
         );
         let (usage, ram) = tab.memory_badge(ui.ctx());
         let response = ui
@@ -3743,7 +3844,7 @@ impl Rectangle {
         let visuals = ui.visuals();
         let fill = if selected {
             visuals.selection.bg_fill
-        } else if response.hovered() || close.hovered() {
+        } else if response.hovered() || close.hovered() || minimize.hovered() {
             visuals.widgets.hovered.weak_bg_fill
         } else {
             visuals.widgets.inactive.weak_bg_fill
@@ -3769,6 +3870,17 @@ impl Rectangle {
             ui.painter()
                 .rect_filled(close_rect, 5, visuals.widgets.active.weak_bg_fill);
         }
+        if minimize.hovered() && can_minimize && !block_input {
+            ui.painter()
+                .rect_filled(minimize_rect, 5, visuals.widgets.active.weak_bg_fill);
+        }
+        ui.painter().line_segment(
+            [
+                minimize_rect.center() - Vec2::new(4.0, 0.0),
+                minimize_rect.center() + Vec2::new(4.0, 0.0),
+            ],
+            egui::Stroke::new(1.5, if can_minimize { INK } else { MUTED }),
+        );
         ui.painter().text(
             close_rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -4042,6 +4154,8 @@ impl Rectangle {
             action = None;
         } else if close.clicked() {
             action = Some(TabAction::Close);
+        } else if minimize.clicked() && can_minimize {
+            action = Some(TabAction::Park);
         }
         (action, dropped_tab, outer.intersect(ui.clip_rect()))
     }
