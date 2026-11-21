@@ -12,6 +12,7 @@ mod launch_trace;
 mod mark;
 mod memory;
 mod navigation;
+mod preferences;
 mod preview;
 mod proton;
 mod rfb;
@@ -37,6 +38,7 @@ const IDLE_MESSAGE: &str = "Container stopped after 30 minutes of inactivity.";
 
 #[derive(Default)]
 struct Rectangle {
+    preference_writes: preferences::Writes,
     agent_images: Vec<images::AgentImage>,
     dragging_tab: Option<u64>,
     parked: Vec<saved::Parked>,
@@ -193,6 +195,23 @@ enum AgentResolution {
 }
 
 impl AgentResolution {
+    fn code(self) -> &'static str {
+        match self {
+            Self::MatchTile => "tile",
+            Self::MatchHost => "host",
+            Self::Uhd => "uhd",
+            Self::Qhd => "qhd",
+            Self::FullHd => "full-hd",
+            Self::Dci2k => "dci-2k",
+            Self::OneK => "one-k",
+        }
+    }
+    fn parse(value: &str) -> Option<Self> {
+        Self::OPTIONS
+            .into_iter()
+            .map(|(mode, _)| mode)
+            .find(|mode| mode.code() == value)
+    }
     const OPTIONS: [(Self, &str); 7] = [
         (Self::Uhd, "4K UHD (3840 × 2160)"),
         (Self::Qhd, "QHD (2560 × 1440)"),
@@ -342,6 +361,7 @@ struct NewTab {
 
 #[derive(Default)]
 struct Tab {
+    preferences: preferences::State,
     navigation: Option<navigation::Navigation>,
     page_rect: Option<Rect>,
     preview: Option<preview::Preview>,
@@ -537,6 +557,7 @@ impl Tab {
             if !self.ran {
                 self.ran = true;
                 self.last_input = Some(Instant::now());
+                ctx.request_repaint();
             }
             if self.agent_port.is_none() && self.navigation.is_none() {
                 let repaint = ctx.clone();
@@ -856,6 +877,65 @@ impl Tab {
 }
 
 impl Rectangle {
+    fn poll_preferences(&mut self, ctx: &egui::Context) {
+        for tab in &mut self.tabs {
+            let Some(session) = &tab.session else {
+                continue;
+            };
+            if !tab.ran {
+                continue;
+            }
+            let target = tab.profile.as_deref().unwrap_or(&session.token).to_owned();
+            if let Some(result) = tab.preferences.poll(&tab.connection, &target, ctx) {
+                match result {
+                    Ok(snapshot) => {
+                        if !tab
+                            .preferences
+                            .changed_locally(preferences::Field::Resolution)
+                            && let Some(resolution) = snapshot.resolution
+                        {
+                            tab.agent_resolution = resolution;
+                        }
+                        if tab.agent_port.is_none()
+                            && !tab.preferences.changed_locally(preferences::Field::Smooth)
+                        {
+                            tab.video_mode = snapshot.smooth;
+                            session.send(rfb::encodings(snapshot.smooth), false);
+                        }
+                        if !tab.preferences.changed_locally(preferences::Field::Folder)
+                            && let Some(folder) = snapshot.folder
+                        {
+                            tab.preferences.folder = folder.clone();
+                            if let Err(error) = tab.explorer.restore(&folder) {
+                                self.error = Some(format!("Could not restore the folder: {error}"));
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                    Err(error) => {
+                        self.error = Some(format!("Could not load tab preferences: {error}"))
+                    }
+                }
+            }
+            if tab.agent_view == AgentView::Files
+                && let Some(folder) = tab.explorer.confirmed_path()
+                && folder != tab.preferences.folder
+            {
+                tab.preferences.folder = folder.to_owned();
+                tab.preferences.changed(preferences::Field::Folder);
+                self.preference_writes.push(
+                    &tab.connection,
+                    target,
+                    preferences::Field::Folder,
+                    saved::encode(folder),
+                );
+            }
+        }
+        if let Some(error) = self.preference_writes.tick(ctx) {
+            self.error = Some(format!("Could not save tab preferences: {error}"));
+            self.quitting = false;
+        }
+    }
     fn snap_tab(&mut self, id: u64, snap: Option<Snap>) {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
@@ -1777,7 +1857,7 @@ impl Rectangle {
     }
 
     fn park_on_quit(&mut self, ctx: &egui::Context) {
-        if self.job.is_some() {
+        if self.job.is_some() || self.preference_writes.pending() {
             return;
         }
         // A stopped tab has no browser to park. Process the rest one at a time.
@@ -2395,6 +2475,10 @@ impl Rectangle {
                         choice = 4;
                     }
                 }
+                let waiting_for_preferences = self.preference_writes.pending() && matches!(dialog, Dialog::Close(..) | Dialog::Clone(..));
+                if waiting_for_preferences {
+                    ui.horizontal(|ui| { ui.spinner(); ui.label("Saving tab settings…"); });
+                }
                 ui.horizontal(|ui| {
                     match &dialog {
                         Dialog::Rename(_, name) | Dialog::Close(_, name) => {
@@ -2404,7 +2488,7 @@ impl Rectangle {
                                 "Save and close"
                             };
                             if ui
-                                .add_enabled(saved::title(name).is_some(), egui::Button::new(label))
+                                .add_enabled(saved::title(name).is_some() && !waiting_for_preferences, egui::Button::new(label))
                                 .clicked()
                             {
                                 choice = 1;
@@ -2415,13 +2499,13 @@ impl Rectangle {
                                 self.tabs.iter().any(|tab| tab.id == *id && tab.session.is_some())
                                     && self.tabs.iter().all(|tab| !tab.title.eq_ignore_ascii_case(name))
                             });
-                            if ui.add_enabled(valid && self.job.is_none() && self.tabs.len() < MAX_TABS, egui::Button::new("Clone")).clicked() {
+                            if ui.add_enabled(valid && self.job.is_none() && self.tabs.len() < MAX_TABS && !waiting_for_preferences, egui::Button::new("Clone")).clicked() {
                                 choice = 1;
                             }
                         }
                         _ => {}
                     }
-                    if !matches!(dialog, Dialog::Rename(..) | Dialog::Clone(..)) && ui.button("Delete").clicked() {
+                    if !matches!(dialog, Dialog::Rename(..) | Dialog::Clone(..)) && ui.add_enabled(!waiting_for_preferences, egui::Button::new("Delete")).clicked() {
                         choice = 2;
                     }
                     if ui.button("Cancel").clicked() {
@@ -2490,7 +2574,7 @@ impl Rectangle {
                 };
                 let tab = &self.tabs[index];
                 if let Some(session) = &tab.session {
-                    let profile = &session.token;
+                    let profile = tab.profile.as_deref().unwrap_or(&session.token);
                     let cmd = if choice == 1 {
                         format!(
                             "save {} {profile} {}",
@@ -2745,6 +2829,7 @@ impl Rectangle {
                         .err()
                         .map(|error| error.to_string());
                     if self.error.is_none() {
+                        tab.preferences.changed(preferences::Field::Folder);
                         tab.last_input = Some(Instant::now());
                     }
                 }
@@ -2805,6 +2890,7 @@ impl Rectangle {
             memory::HostMetric::Disk,
         );
         self.poll_job(&ctx);
+        self.poll_preferences(&ctx);
         if !self.quitting {
             self.pending_update = None;
             if let Some(candidate) = self.updater.poll() {
@@ -2817,7 +2903,9 @@ impl Rectangle {
         if !ui.input(|i| i.viewport().close_requested()) && !self.quitting {
             self.poll_startup(&ctx);
         }
-        if ui.input(|input| input.viewport().close_requested()) && !self.tabs.is_empty() {
+        if ui.input(|input| input.viewport().close_requested())
+            && (!self.tabs.is_empty() || self.preference_writes.pending())
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.settings_edit = None;
             self.dialog = None;
@@ -3261,6 +3349,11 @@ impl Rectangle {
                         && let Some(session) = &tab.session
                         && tab.ran
                     {
+                        if !tab.preferences.ready {
+                            ui.spinner();
+                            ui.label("Loading saved folder…");
+                            return;
+                        }
                         tab.page_rect = Some(pane);
                         let target = ctx
                             .pointer_latest_pos()
@@ -4035,10 +4128,34 @@ impl Rectangle {
                     .is_some_and(|session| session.send(rfb::encodings(enabled), false))
                 {
                     tab.video_mode = enabled;
+                    tab.preferences.changed(preferences::Field::Smooth);
+                    let target = tab
+                        .profile
+                        .clone()
+                        .unwrap_or_else(|| tab.session.as_ref().unwrap().token.clone());
+                    self.preference_writes.push(
+                        &tab.connection,
+                        target,
+                        preferences::Field::Smooth,
+                        if enabled { "on" } else { "off" }.into(),
+                    );
                 }
             }
             TabAction::AgentResolution(resolution) => {
                 tab.agent_resolution = resolution;
+                tab.preferences.changed(preferences::Field::Resolution);
+                if let Some(target) = tab
+                    .profile
+                    .clone()
+                    .or_else(|| tab.session.as_ref().map(|session| session.token.clone()))
+                {
+                    self.preference_writes.push(
+                        &tab.connection,
+                        target,
+                        preferences::Field::Resolution,
+                        resolution.code().into(),
+                    );
+                }
                 ctx.request_repaint();
             }
             TabAction::OpenAgentView(kind) => self.open_agent_view(ctx, index, kind),

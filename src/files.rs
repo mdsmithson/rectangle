@@ -94,6 +94,8 @@ pub struct FileEditor {
 }
 
 pub struct Explorer {
+    confirmed: Option<String>,
+    restoring: bool,
     path: String,
     back: Vec<String>,
     forward: Vec<String>,
@@ -114,6 +116,8 @@ pub struct Explorer {
 impl Default for Explorer {
     fn default() -> Self {
         Self {
+            confirmed: None,
+            restoring: false,
             path: format!("{HOME}/workspace"),
             back: Vec::new(),
             forward: Vec::new(),
@@ -134,6 +138,16 @@ impl Default for Explorer {
 }
 
 impl Explorer {
+    pub fn confirmed_path(&self) -> Option<&str> {
+        self.confirmed.as_deref()
+    }
+    pub fn restore(&mut self, path: &str) -> io::Result<()> {
+        self.navigate("", "", path)?;
+        self.back.clear();
+        self.forward.clear();
+        self.restoring = path != crate::preferences::DEFAULT_FOLDER;
+        Ok(())
+    }
     pub fn uploading(&self) -> bool {
         self.job.is_some()
     }
@@ -147,6 +161,7 @@ impl Explorer {
         self.prompt = None;
     }
     fn open(&mut self, path: String) {
+        self.restoring = false;
         if path != self.path {
             self.back.push(std::mem::replace(&mut self.path, path));
             self.forward.clear();
@@ -267,6 +282,9 @@ impl Explorer {
                         .and_then(|data| parse_listing(&data))
                     {
                         Ok((total, entries)) => {
+                            self.confirmed = Some(self.path.clone());
+                            self.restoring = false;
+                            ui.ctx().request_repaint();
                             self.total = total;
                             if self.offset > 0 && self.offset >= total {
                                 self.offset = total.saturating_sub(1) / PAGE * PAGE;
@@ -275,8 +293,18 @@ impl Explorer {
                             self.entries = entries;
                         }
                         Err(error) => {
+                            let mut message = error.to_string();
+                            if self.restoring {
+                                self.restoring = false;
+                                self.path = crate::preferences::DEFAULT_FOLDER.into();
+                                self.reset();
+                                ui.ctx().request_repaint();
+                                message = format!(
+                                    "The previous folder is unavailable ({error}). Opening the workspace instead."
+                                );
+                            }
                             self.entries.clear();
-                            self.status = Some((false, error.to_string()));
+                            self.status = Some((false, message));
                         }
                     }
                 }
@@ -893,4 +921,30 @@ fn folder_address_round_trips_and_cannot_switch_agents() {
     assert_eq!(explorer.path, "/agent/home/workspace");
     explorer.history(false);
     assert_eq!(explorer.path, input);
+}
+
+#[test]
+fn missing_restored_folder_falls_back_without_remembering_the_failed_path() {
+    let ctx = egui::Context::default();
+    let mut explorer = Explorer::default();
+    explorer.restore("/agent/home/deleted folder").unwrap();
+    assert!(explorer.confirmed_path().is_none());
+    let (send, receive) = std::sync::mpsc::channel();
+    send.send(Err(io::Error::other("No such directory")))
+        .unwrap();
+    explorer.listing = Some(receive);
+    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        explorer.show(
+            ui,
+            &Connection::default(),
+            "test",
+            "Agent",
+            false,
+            false,
+            ui.max_rect(),
+        );
+    });
+    assert_eq!(explorer.path(), crate::preferences::DEFAULT_FOLDER);
+    assert!(explorer.confirmed_path().is_none());
+    assert!(explorer.back.is_empty());
 }

@@ -79,6 +79,7 @@ release_browser() {
         metadata_lock
         if [ ! -f "$saved/$profile_id" ]; then
             docker volume rm "rectangle-profile-$profile_id" >/dev/null 2>&1 || :
+            rm -f -- "$config/tab-preferences/$profile_id.json"
         fi
     fi
     rm -f -- "$runtime/socket/egress.sock"
@@ -330,6 +331,13 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
             exit 1
         }
         exec "$proton_helper" replace ;;
+    'tab-preferences '*)
+        fields=${requested#* }
+        IFS=' ' read -r id field value extra <<EOF
+$fields
+EOF
+        valid_token "$id" && [ -n "$field" ] && [ -z "$extra" ] || bad_resolution
+        exec python3 -I "$assets/tab_preferences.py" "$id" "$field" "$value" ;;
     list|list-v2)
         metadata_lock
         if [ "$requested" = list ]; then printf 'RECTSAVED1\n'; else printf 'RECTSAVED2\n'; fi
@@ -378,7 +386,7 @@ EOF
         check_live "$running" "$id" || { echo 'This tab is no longer running.' >&2; exit 1; }
         if [ "$operation" = discard ]; then
             if [ -f "$assets/smb.py" ]; then python3 -I "$assets/smb.py" protect "$id"; fi
-            rm -f -- "$saved/$id" "$agent_memory/$id"
+            rm -f -- "$saved/$id" "$agent_memory/$id" "$config/tab-preferences/$id.json"
         else
             case $title in ''|*[!0-9a-f]*) bad_resolution ;; esac
             [ "${#title}" -le 160 ] && [ "$((${#title} % 2))" -eq 0 ] || bad_resolution
@@ -459,7 +467,7 @@ EOF
         if [ -f "$saved/$id" ]; then
             if [ -f "$assets/smb.py" ]; then python3 -I "$assets/smb.py" check-storage "$id"; fi
             docker volume rm "rectangle-profile-$id" >/dev/null
-            rm -f -- "$saved/$id" "$agent_memory/$id"
+            rm -f -- "$saved/$id" "$agent_memory/$id" "$config/tab-preferences/$id.json"
             if [ -f "$assets/smb.py" ]; then python3 -I "$assets/smb.py" forget-storage "$id"; fi
         fi
         printf 'OK\n'
@@ -841,7 +849,10 @@ cleanup() {
     if [ "$egress_started" = true ]; then docker rm -f "$egress" >/dev/null 2>&1 || :; fi
     if [ -n "$volume" ]; then
         metadata_lock
-        if [ ! -f "$saved/$profile_id" ]; then docker volume rm "$volume" >/dev/null 2>&1 || :; fi
+        if [ ! -f "$saved/$profile_id" ]; then
+            docker volume rm "$volume" >/dev/null 2>&1 || :
+            rm -f -- "$config/tab-preferences/$profile_id.json"
+        fi
     fi
     rm -f -- "$runtime/socket/egress.sock"
     rmdir "$runtime/socket" "$runtime" 2>/dev/null || :

@@ -14,6 +14,9 @@ import sys
 import tempfile
 import uuid
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tab_preferences
+
 ROOT = Path.home() / ".config/rectangle"
 ID = re.compile(r"[0-9a-f]{32}")
 
@@ -186,6 +189,9 @@ def clone(token, encoded, helper_image, startup=""):
                     (ROOT / "agent-memory").mkdir(exist_ok=True)
                     write(ROOT / "agent-memory" / identity, f"{memory}\n")
             record = title.encode().hex() + (f" {page}" if page else "") + "\n"
+            source_profile = labels.get("rectangle.profile", "")
+            if ID.fullmatch(source_profile):
+                tab_preferences.copy_profile(source_profile, identity)
             write(saved / identity, record)
             published = True
         finally:
@@ -201,6 +207,7 @@ def clone(token, encoded, helper_image, startup=""):
                         with suppress(ValueError, subprocess.SubprocessError):
                             docker("volume", "rm", volume)
                     (ROOT / "agent-memory" / identity).unlink(missing_ok=True)
+                    (ROOT / "tab-preferences" / (identity + ".json")).unlink(missing_ok=True)
         print("RECTSAVED2")
         print(identity, record.strip())
 
