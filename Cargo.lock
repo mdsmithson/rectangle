@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "rectangle"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "eframe",
  "flate2",

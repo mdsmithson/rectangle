@@ -16,6 +16,7 @@ mod rfb;
 mod saved;
 mod session;
 mod settings;
+mod startup;
 mod terminal;
 mod tiling;
 mod update;
@@ -37,9 +38,7 @@ struct Rectangle {
     agent_images: Vec<images::AgentImage>,
     dragging_tab: Option<u64>,
     parked: Vec<saved::Parked>,
-    startup_parked: Vec<(Backend, std::sync::mpsc::Receiver<std::io::Result<String>>)>,
-    startup_entries: Vec<(Backend, saved::Parked)>,
-    startup_errors: Vec<(Backend, String)>,
+    startup: Vec<(Backend, Connection, startup::Host)>,
     secondary: Connection,
     secondary_entries: Vec<saved::Entry>,
     library_loaded: Option<Backend>,
@@ -886,74 +885,71 @@ impl Rectangle {
         for backend in [Backend::Primary, Backend::Secondary] {
             let connection = self.connection(backend);
             let host = connection.host.trim();
-            if host.is_empty() {
-                continue;
+            if !host.is_empty() {
+                let job = startup::Host::start(host, connection.key.as_deref(), ctx);
+                self.startup.push((backend, connection, job));
             }
-            let repaint = ctx.clone();
-            match saved::run(host, connection.key.as_deref(), "parked-list", move || {
-                repaint.request_repaint()
-            }) {
-                Ok(task) => self.startup_parked.push((backend, task)),
-                Err(err) => self.startup_errors.push((backend, err.to_string())),
-            }
-        }
-        if self.startup_parked.is_empty() {
-            self.finish_startup(ctx);
         }
     }
 
     fn poll_startup(&mut self, ctx: &egui::Context) {
-        use std::sync::mpsc::TryRecvError;
-        if self.startup_parked.is_empty() {
-            return;
-        }
-        self.startup_parked.retain(|(backend, task)| {
-            match task.try_recv() {
-                Err(TryRecvError::Empty) => return true,
-                Err(TryRecvError::Disconnected) => self
-                    .startup_errors
-                    .push((*backend, "parked sessions request disconnected".into())),
-                Ok(result) => match result.and_then(|data| saved::parse_parked(&data)) {
-                    Ok(entries) => self
-                        .startup_entries
-                        .extend(entries.into_iter().map(|entry| (*backend, entry))),
-                    Err(err) => self.startup_errors.push((*backend, err.to_string())),
-                },
+        let mut ready = Vec::new();
+        self.startup.retain_mut(|(backend, connection, job)| {
+            if let Some(result) = job.poll() {
+                ready.push((*backend, connection.clone(), result));
+                false
+            } else {
+                true
             }
-            false
         });
-        if self.startup_parked.is_empty() {
-            self.finish_startup(ctx);
+        for (backend, connection, result) in ready {
+            let current = self.connection(backend);
+            if current.host != connection.host || current.key != connection.key {
+                continue;
+            }
+            self.finish_startup_host(ctx, backend, result);
         }
     }
 
-    fn finish_startup(&mut self, ctx: &egui::Context) {
-        let startup_errors = std::mem::take(&mut self.startup_errors);
-        let mut errors: Vec<_> = startup_errors
+    fn startup_pending(&self, backend: Backend) -> bool {
+        self.startup
             .iter()
-            .map(|(backend, err)| format!("{}: {err}", backend.name(&self.host)))
+            .any(|(pending, _, _)| *pending == backend)
+    }
+
+    fn finish_startup_host(
+        &mut self,
+        ctx: &egui::Context,
+        backend: Backend,
+        result: startup::Snapshot,
+    ) {
+        let mut errors: Vec<_> = result
+            .errors
+            .into_iter()
+            .map(|error| format!("{}: {error}", backend.name(&self.host)))
             .collect();
         errors.extend(self.error.take());
-        let mut entries = std::mem::take(&mut self.startup_entries);
-        entries
-            .sort_by_key(|(backend, entry)| (*backend as u8, entry.expires, entry.token.clone()));
-        for (backend, entry) in entries {
-            // These containers are already running. The new-tab limit shouldn't leave any parked.
-            self.resume_parked(ctx, backend, entry);
+        if let Some(entries) = result.entries {
+            match backend {
+                Backend::Primary => self.entries = entries,
+                Backend::Secondary => self.secondary_entries = entries,
+            }
+        }
+        if backend == self.library_host {
+            self.library_loaded = Some(backend);
+            self.parked = result.parked.clone().unwrap_or_default();
+        }
+        // A slow second host must not delay this one or take focus away from a
+        // tab the user is already working in when its own results arrive later.
+        let focus = self.tabs.is_empty();
+        let mut parked = result.parked.unwrap_or_default();
+        parked.sort_by_key(|entry| (entry.expires, entry.token.clone()));
+        for entry in parked {
+            self.resume_parked_with_focus(ctx, backend, entry, focus);
             errors.extend(self.error.take());
         }
-        if let Some(index) = self.tabs.iter().position(|tab| tab.snap.is_some()) {
+        if focus && let Some(index) = self.tabs.iter().position(|tab| tab.snap.is_some()) {
             self.select_tab(index);
-        }
-        if self.tabs.is_empty() {
-            let backend = self.library_host;
-            if !startup_errors
-                .iter()
-                .any(|(failed_backend, _)| *failed_backend == backend)
-            {
-                self.refresh(ctx);
-                errors.extend(self.error.take());
-            }
         }
         if !errors.is_empty() {
             self.error = Some(errors.join("\n"));
@@ -961,6 +957,16 @@ impl Rectangle {
     }
 
     fn resume_parked(&mut self, ctx: &egui::Context, backend: Backend, entry: saved::Parked) {
+        self.resume_parked_with_focus(ctx, backend, entry, true);
+    }
+
+    fn resume_parked_with_focus(
+        &mut self,
+        ctx: &egui::Context,
+        backend: Backend,
+        entry: saved::Parked,
+        focus: bool,
+    ) {
         let connection = self.connection(backend);
         let volume = settings::tab_volume(
             connection.host.trim(),
@@ -974,7 +980,7 @@ impl Rectangle {
             move || repaint.request_repaint(),
         ) {
             Ok(session) => {
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if focus && let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.blur();
                 }
                 self.next_id += 1;
@@ -1010,8 +1016,10 @@ impl Rectangle {
                     started: Some(Instant::now()),
                     ..Default::default()
                 });
-                self.active = self.tabs.len() - 1;
-                self.home = false;
+                if focus {
+                    self.active = self.tabs.len() - 1;
+                    self.home = false;
+                }
                 self.parked.retain(|parked| parked.token != entry.token);
                 self.error = None;
             }
@@ -2815,7 +2823,14 @@ impl Rectangle {
                 return;
             }
         }
-        let restoring = !self.startup_parked.is_empty();
+        let visible_backend = if self.home {
+            self.library_host
+        } else {
+            self.tabs
+                .get(self.active)
+                .map_or(self.library_host, |tab| tab.backend)
+        };
+        let restoring = self.startup_pending(visible_backend);
         let mut block_input = restoring
             || self.dialog.is_some()
             || self.settings_edit.is_some()
@@ -4556,4 +4571,84 @@ fn embedded_artwork_matches_the_generated_pixels() {
         &include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba"))[..],
         artwork::icon(64)
     );
+}
+
+#[test]
+fn startup_ready_host_does_not_wait_for_another_host_or_refresh_again() {
+    use std::sync::mpsc;
+    let ctx = egui::Context::default();
+    let mut app = Rectangle {
+        host: "ready-host".into(),
+        secondary: Connection {
+            host: "slow-host".into(),
+            key: None,
+        },
+        home: true,
+        ..Default::default()
+    };
+    let mut senders = Vec::new();
+    for backend in [Backend::Primary, Backend::Secondary] {
+        let (library_tx, library_rx) = mpsc::channel();
+        let (parked_tx, parked_rx) = mpsc::channel();
+        if backend == Backend::Primary {
+            library_tx
+                .send(Ok(
+                    "RECTSAVED2\n1234567890abcdef1234567890abcdef 5265616479 browser\n".into(),
+                ))
+                .unwrap();
+            parked_tx.send(Ok("RECTPARK1\n".into())).unwrap();
+        }
+        senders.push((library_tx, parked_tx));
+        app.startup.push((
+            backend,
+            app.connection(backend),
+            startup::Host::from_tasks(library_rx, parked_rx),
+        ));
+    }
+    app.poll_startup(&ctx);
+    assert!(!app.startup_pending(Backend::Primary));
+    assert!(app.startup_pending(Backend::Secondary));
+    assert_eq!(app.entries.len(), 1);
+    assert_eq!(app.entries[0].title, "Ready");
+    assert!(app.library_loaded == Some(Backend::Primary));
+    assert!(app.job.is_none());
+    assert!(app.home);
+    assert!(app.error.is_none());
+}
+
+#[test]
+fn late_startup_result_preserves_selection_and_ignores_reconfigured_host() {
+    let ctx = egui::Context::default();
+    let mut app = Rectangle {
+        host: "new-host".into(),
+        tabs: vec![Tab {
+            id: 42,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let snapshot = startup::Snapshot {
+        entries: Some(Vec::new()),
+        parked: Some(Vec::new()),
+        errors: vec!["offline".into()],
+    };
+    app.finish_startup_host(&ctx, Backend::Secondary, snapshot);
+    assert_eq!(app.tabs[app.active].id, 42);
+    assert!(!app.home);
+    assert!(app.error.as_deref().unwrap().contains("offline"));
+    let (library_tx, library_rx) = std::sync::mpsc::channel();
+    let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+    library_tx.send(Ok("RECTSAVED2\n".into())).unwrap();
+    parked_tx.send(Ok("RECTPARK1\n".into())).unwrap();
+    app.startup.push((
+        Backend::Primary,
+        Connection {
+            host: "old-host".into(),
+            key: None,
+        },
+        startup::Host::from_tasks(library_rx, parked_rx),
+    ));
+    app.poll_startup(&ctx);
+    assert!(app.library_loaded.is_none());
+    assert_eq!(app.tabs[app.active].id, 42);
 }
