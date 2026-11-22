@@ -161,7 +161,7 @@ impl Updater {
 
     pub fn show(&mut self, ui: &mut egui::Ui, hosts: &[crate::Connection]) -> Option<PathBuf> {
         ui.heading(format!("Rectangle {VERSION}"));
-        ui.label("Update builds the desktop client and updates configured servers that are behind. The desktop build needs Git, Rust/Cargo, and the Windows C++ build tools.");
+        ui.label("Update builds the desktop client and updates configured servers that are behind. The desktop build needs Git, Rust/Cargo, and platform build tools (Xcode Command Line Tools on Mac; C++ Build Tools on Windows).");
         if !self.status.is_empty() {
             ui.colored_label(
                 if self.failed {
@@ -180,7 +180,10 @@ impl Updater {
             }
         } else {
             if ui
-                .add_enabled(cfg!(windows), egui::Button::new("Check for updates"))
+                .add_enabled(
+                    cfg!(any(windows, target_os = "macos")),
+                    egui::Button::new("Check for updates"),
+                )
                 .clicked()
             {
                 self.available = None;
@@ -287,12 +290,36 @@ fn encoded_command(script: &str) -> String {
     command
 }
 
-fn ps(mode: &str) -> io::Result<Command> {
-    #[cfg(not(windows))]
+fn platform_command(mode: &str) -> io::Result<Command> {
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     return Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "Updates are available on Windows.",
     ));
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", include_str!("update-macos.sh"), "rectangle-update"])
+            .env("RECTANGLE_UPDATE_MODE", mode)
+            .stdin(Stdio::null());
+        // Finder does not inherit the shell's Rust PATH.
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| io::Error::other("No home directory available"))?;
+        let mut paths = vec![
+            PathBuf::from(home).join(".cargo/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        command.env(
+            "PATH",
+            std::env::join_paths(paths).map_err(io::Error::other)?,
+        );
+        Ok(command)
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -312,7 +339,7 @@ fn ps(mode: &str) -> io::Result<Command> {
 }
 
 fn check() -> io::Result<ResultState> {
-    let result = ps("check")?.output()?;
+    let result = platform_command("check")?.output()?;
     if !result.status.success() {
         let error = String::from_utf8_lossy(&result.stderr).trim().to_owned();
         return Err(io::Error::other(format!("Could not check GitHub: {error}")));
@@ -331,7 +358,7 @@ fn build(sha: &str, version: &str) -> io::Result<PathBuf> {
     fs::create_dir(&directory)?;
     let log = directory.join("build.log");
     let output = fs::File::create(&log)?;
-    let result = ps("build")?
+    let result = platform_command("build")?
         .env("RECTANGLE_UPDATE_DIR", &directory)
         .env("RECTANGLE_UPDATE_SHA", sha)
         .env("RECTANGLE_UPDATE_VERSION", version)
@@ -347,15 +374,20 @@ fn build(sha: &str, version: &str) -> io::Result<PathBuf> {
             log.display()
         )));
     }
-    let candidate = directory.join("rectangle.exe");
+    let candidate = directory.join(if cfg!(windows) {
+        "rectangle.exe"
+    } else {
+        "rectangle"
+    });
     if !candidate.is_file() {
         return Err(io::Error::other(
-            "The update did not produce a Windows executable.",
+            "The update did not produce a client executable.",
         ));
     }
     Ok(candidate)
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn install(candidate: &Path) -> io::Result<()> {
     let target = std::env::current_exe()?;
     let args = std::env::args_os()
@@ -363,7 +395,7 @@ pub fn install(candidate: &Path) -> io::Result<()> {
         .map(|value| quote_argument(&value.to_string_lossy()))
         .collect::<Vec<_>>()
         .join(" ");
-    ps("install")?
+    platform_command("install")?
         .env("RECTANGLE_UPDATE_TARGET", target)
         .env("RECTANGLE_UPDATE_CANDIDATE", candidate)
         .env("RECTANGLE_UPDATE_PID", std::process::id().to_string())
@@ -373,6 +405,7 @@ pub fn install(candidate: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn quote_argument(value: &str) -> String {
     let mut quoted = String::from("\"");
     let mut slashes = 0;
@@ -411,4 +444,32 @@ mod tests {
         assert!(check_result(&format!("{sha} 10.00.0")).is_err());
         assert!(check_result("main 10.0.0").is_err());
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn install(candidate: &Path) -> io::Result<()> {
+    let target = std::env::current_exe()?;
+    // Fail before closing the UI if this installation cannot be replaced.
+    let probe = target.with_extension(format!("update-probe-{}", std::process::id()));
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)?;
+    fs::remove_file(probe)?;
+    let script = candidate.with_file_name("install.sh");
+    fs::write(&script, include_str!("update-macos.sh"))?;
+    Command::new("/usr/bin/nohup")
+        .arg("/bin/sh")
+        .arg(script)
+        .env("RECTANGLE_UPDATE_MODE", "install")
+        .env("RECTANGLE_UPDATE_TARGET", target)
+        .env("RECTANGLE_UPDATE_CANDIDATE", candidate)
+        .env("RECTANGLE_UPDATE_PID", std::process::id().to_string())
+        .env("RECTANGLE_UPDATE_CWD", std::env::current_dir()?)
+        .args(std::env::args_os().skip(1))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
 }

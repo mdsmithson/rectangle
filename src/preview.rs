@@ -90,17 +90,40 @@ impl Drop for Preview {
 }
 
 fn brave_path() -> io::Result<PathBuf> {
-    ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .map(|base| PathBuf::from(base).join("BraveSoftware/Brave-Browser/Application/brave.exe"))
-        .find(|path| path.is_file())
-        .ok_or_else(|| {
+    #[cfg(target_os = "macos")]
+    {
+        let mut paths = vec![PathBuf::from(
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        )];
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.push(
+                PathBuf::from(home)
+                    .join("Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+            );
+        }
+        return paths.into_iter().find(|p| p.is_file()).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "Brave was not found on this computer.",
+                "Install Brave Browser to open previews.",
             )
-        })
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(|base| {
+                PathBuf::from(base).join("BraveSoftware/Brave-Browser/Application/brave.exe")
+            })
+            .find(|path| path.is_file())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Brave was not found on this computer.",
+                )
+            })
+    }
 }
 
 fn relay(socket: TcpStream, mut command: Command, stop: &AtomicBool) -> io::Result<()> {

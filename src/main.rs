@@ -9,6 +9,8 @@ mod files;
 mod graphics;
 mod images;
 mod launch_trace;
+#[cfg(target_os = "macos")]
+mod mac_audio;
 mod mark;
 mod memory;
 mod navigation;
@@ -770,12 +772,12 @@ impl Tab {
                     modifiers,
                     ..
                 } if self.captured => {
-                    let modified = modifiers.ctrl || modifiers.alt;
+                    let modified = modifiers.ctrl || modifiers.command || modifiers.alt;
                     let Some(symbol) = keysym(key, modified) else {
                         continue;
                     };
                     let mods = [
-                        (modifiers.ctrl, 0xffe3),
+                        (modifiers.ctrl || modifiers.command, 0xffe3),
                         (modifiers.alt, 0xffe9),
                         (modifiers.shift, 0xffe1),
                     ];
@@ -3051,7 +3053,7 @@ impl Rectangle {
                 i.events.iter().any(|event| {
                     matches!(event,
                 Event::Key { key, pressed: true, repeat: false, modifiers, .. }
-                if *key == wanted && modifiers.ctrl && !modifiers.alt && !modifiers.shift)
+                if *key == wanted && (modifiers.ctrl || modifiers.command) && !modifiers.alt && !modifiers.shift)
                 })
             };
             (has(Key::T), has(Key::W))
@@ -4437,7 +4439,7 @@ impl Rectangle {
                     .filter(|event| {
                         !matches!(event,
                 Event::Key { key: Key::T | Key::W, modifiers, .. }
-                if modifiers.ctrl && !modifiers.alt && !modifiers.shift)
+                if (modifiers.ctrl || modifiers.command) && !modifiers.alt && !modifiers.shift)
                     })
                     .cloned()
                     .collect()

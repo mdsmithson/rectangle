@@ -492,9 +492,25 @@ pub(super) fn save_as(name: &str) -> io::Result<Option<PathBuf>> {
     ))))
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub(super) fn save_as(_: &str) -> io::Result<Option<PathBuf>> {
     Err(io::Error::other(
         "Save As is available in the Windows client.",
     ))
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn save_as(name: &str) -> io::Result<Option<PathBuf>> {
+    let name = name.replace(['/', ':', '\0'], "_");
+    let result = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", "on run argv", "-e", "try", "-e", "return POSIX path of (choose file name with prompt \"Save Agent file as\" default name (item 1 of argv))", "-e", "on error number -128", "-e", "return \"\"", "-e", "end try", "-e", "end run", "--"])
+        .arg(name).output()?;
+    if !result.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&result.stderr).into_owned(),
+        ));
+    }
+    let path = String::from_utf8(result.stdout).map_err(io::Error::other)?;
+    let path = path.strip_suffix('\n').unwrap_or(&path);
+    Ok((!path.is_empty()).then(|| PathBuf::from(path)))
 }

@@ -4,20 +4,42 @@ permissions:
   contents: read
 
 jobs:
-  windows-client:
-    runs-on: windows-latest
+  desktop-client:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: rectangle-windows-x64
+          - os: macos-15
+            artifact: rectangle-macos-arm64
+          - os: macos-15-intel
+            artifact: rectangle-macos-x64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable
       - run: cargo +stable fmt --check
       - run: cargo +stable test --locked
       - run: cargo +stable build --release --locked
+      - if: runner.os == 'macOS'
+        run: |
+          python3 -m unittest discover -s scripts
+          sh scripts/package-macos.sh
+          ditto -c -k --keepParent target/release/Rectangle.app target/release/Rectangle-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/release/rectangle.exe
+            target/release/Rectangle-macos.zip
+          if-no-files-found: error
   linux-server:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: |
           python3 -m unittest discover -s server
-          for file in server/install.sh server/setup-oracle.sh server/rectangle-session server/rectangle-proton server/entrypoint server/agent-entrypoint; do
+          for file in server/install.sh server/setup-oracle.sh server/rectangle-session server/rectangle-proton server/entrypoint server/agent-entrypoint src/update-macos.sh scripts/package-macos.sh; do
             sh -n "$file" || exit 1
           done

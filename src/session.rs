@@ -48,13 +48,43 @@ pub fn monitor(host: &str, identity: Option<&std::path::Path>, disk: bool) -> io
     )?;
     #[cfg(windows)]
     let mut command = command;
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let mut command = {
         let mut terminal = Command::new("x-terminal-emulator");
         terminal
             .arg("-e")
             .arg(command.get_program())
             .args(command.get_args());
+        terminal
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        fn quote(value: &str) -> String {
+            format!("'{}'", value.replace('\'', "'\"'\"'"))
+        }
+        let line = std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|s| quote(&s.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut terminal = Command::new("/usr/bin/osascript");
+        terminal
+            .args([
+                "-e",
+                "on run argv",
+                "-e",
+                "tell application \"Terminal\"",
+                "-e",
+                "activate",
+                "-e",
+                "do script (item 1 of argv)",
+                "-e",
+                "end tell",
+                "-e",
+                "end run",
+                "--",
+            ])
+            .arg(line);
         terminal
     };
     let mut child = command.spawn()?;

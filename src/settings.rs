@@ -4,6 +4,11 @@ use std::{
 };
 
 fn path() -> io::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let dir = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support"))
+        .ok_or_else(|| io::Error::other("No home directory available"))?;
+    #[cfg(not(target_os = "macos"))]
     let dir = std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
         .or_else(|| {

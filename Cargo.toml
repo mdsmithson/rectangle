@@ -1,9 +1,9 @@
 [package]
 name = "rectangle"
-version = "0.1.27"
+version = "0.1.28"
 edition = "2024"
 license = "Apache-2.0"
-description = "A Windows client for browser and terminal sessions on your own Linux server"
+description = "A desktop client for browser and terminal sessions on your own Linux server"
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -20,6 +20,9 @@ flate2 = "=1.1.10"
 [target.'cfg(windows)'.dependencies]
 pollster = "=1.0.1"
 windows-sys = { version = "=0.61.2", features = ["Win32_Media_Audio", "Win32_UI_Controls_Dialogs"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = "=0.18.2"
 
 [profile.release]
 lto = "thin"

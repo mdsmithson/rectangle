@@ -933,7 +933,7 @@ fn missing_restored_folder_falls_back_without_remembering_the_failed_path() {
     send.send(Err(io::Error::other("No such directory")))
         .unwrap();
     explorer.listing = Some(receive);
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
         explorer.show(
             ui,
             &Connection::default(),
@@ -944,6 +944,7 @@ fn missing_restored_folder_falls_back_without_remembering_the_failed_path() {
             ui.max_rect(),
         );
     });
+    output.textures_delta.clear();
     assert_eq!(explorer.path(), crate::preferences::DEFAULT_FOLDER);
     assert!(explorer.confirmed_path().is_none());
     assert!(explorer.back.is_empty());

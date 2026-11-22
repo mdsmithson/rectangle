@@ -82,7 +82,7 @@ impl Drop for Audio {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn play(_: impl Read, _: &AtomicU8, _: impl FnOnce()) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -290,4 +290,9 @@ fn plays_a_remote_tab_stream_through_windows() {
     }
     drop(audio);
     assert!(tab.view.lock().unwrap().error.is_none());
+}
+
+#[cfg(target_os = "macos")]
+fn play(source: impl Read, volume: &AtomicU8, ready: impl FnOnce()) -> io::Result<()> {
+    crate::mac_audio::play(source, volume, ready)
 }

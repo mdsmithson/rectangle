@@ -1,6 +1,6 @@
 # Rectangle
 
-Rectangle is a Windows desktop client for Browser and Agent sessions on a Linux Docker host you control. Browser tabs run Firefox with uBlock Origin. Agent tabs run Freebuff in an Alpine terminal. Each tab has its own container. The client sends input and receives the remote display over SSH.
+Rectangle is a macOS and Windows desktop client for Browser and Agent sessions on a Linux Docker host you control. Browser tabs run Firefox with uBlock Origin. Agent tabs run Freebuff in an Alpine terminal. Each tab has its own container. The client sends input and receives the remote display over SSH.
 
 ## Install
 
@@ -20,7 +20,7 @@ sh server/install.sh --vpn-only
 
 The installer builds the images and sets up the launcher in `~/.local/bin/`. Use the same account for installation and Rectangle connections. The HTTPS proxy blocks private and special-use destinations and permits public HTTPS on port 443. No Browser display ports need to be opened. If using a VPS, restrict inbound SSH to your client network where practical.
 
-### 2. Authorize the Windows client
+### 2. Authorize the client
 
 In PowerShell, make a dedicated client key (choose a unique filename if it already exists):
 
@@ -30,13 +30,22 @@ ssh-keygen -t ed25519 -f "$HOME/.ssh/rectangle_ed25519"
 Get-Content "$HOME/.ssh/rectangle_ed25519.pub"
 ```
 
+On macOS, use Terminal instead:
+
+```sh
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+ssh-keygen -t ed25519 -f "$HOME/.ssh/rectangle_ed25519"
+cat "$HOME/.ssh/rectangle_ed25519.pub"
+```
+
 On the Linux server, create `~/.ssh` with mode 700, then add this line to the same account's `~/.ssh/authorized_keys` (mode 600). Replace the placeholder with the **entire public-key line** from PowerShell:
 
 ```text
 restrict,command="exec ~/.local/bin/rectangle-session" PASTE_PUBLIC_KEY_LINE_HERE
 ```
 
-Optional: install `btop` on the server and add `pty` after `restrict` on that line to enable the interactive host monitor. Keep the private key on Windows. If it has a passphrase, load it into the Windows OpenSSH agent with `ssh-add`. Verify the server's SSH host-key fingerprint against the server console before accepting it; Rectangle uses strict host-key checking.
+Optional: install `btop` on the server and add `pty` after `restrict` on that line to enable the interactive host monitor. Keep each computer's private key on that computer. On Mac, load a passphrase-protected key with `ssh-add`. If it has a passphrase, load it into the Windows OpenSSH agent with `ssh-add`. Verify the server's SSH host-key fingerprint against the server console before accepting it; Rectangle uses strict host-key checking.
 
 Replace `user@server.example` below with your SSH login to confirm the launcher is reachable:
 
@@ -55,7 +64,27 @@ cargo +stable build --release --locked
 .\target\release\rectangle.exe
 ```
 
-In **Settings → Connections**, enter your own `user@host` and the path to your private key. Click **Save settings**, then **+ New Tab → Browser**. If you have another Linux server, configure it under **Secondary**. The Home library lists sessions by server. A native Mac build is not included.
+In **Settings → Connections**, enter your own `user@host` and the path to your private key. Click **Save settings**, then **+ New Tab → Browser**. If you have another Linux server, configure it under **Secondary**. The Home library lists sessions by server.
+### 4. Build and open the Mac client
+
+On Apple Silicon (including MacBook Air), install [Rust](https://rustup.rs/) and Apple's Command Line Tools (`xcode-select --install`). macOS already includes OpenSSH, Git (with the command line tools), curl, and osascript. From the repository root:
+
+```sh
+cargo +stable build --release --locked
+sh scripts/package-macos.sh
+mkdir -p "$HOME/Applications"
+cp -R target/release/Rectangle.app "$HOME/Applications/"
+open "$HOME/Applications/Rectangle.app"
+```
+
+Keep the app in a writable location such as `~/Applications` so it can update itself. Configure the same Linux server in Settings → Connections with this Mac's own SSH key and verified host key. The Linux Docker host remains separate; running the client on Apple Silicon does not require moving or rebuilding your server containers. Native Intel Mac builds use the same commands on an Intel Mac.
+
+Mac audio uses CoreAudio. Downloads use a native Save As dialog, server meters open Terminal, and previews require Brave Browser in `/Applications` or `~/Applications`. macOS may ask for permission to control Terminal. Command+T/W opens/closes tabs; Command+C/V/X integrates with the remote clipboard.
+
+Settings are stored in `~/Library/Application Support/Rectangle/` on Mac. Windows keeps `%LOCALAPPDATA%\Rectangle`. Local workspace layouts and SSH identities belong to each computer; saved server sessions can be reopened from either client.
+
+CI builds and tests Windows x64, Apple Silicon, and Intel Mac clients on every push and pull request. Download the matching artifact from the successful GitHub Actions run. Mac bundles use local ad-hoc signing; they are not Developer ID signed or notarized. For initial installation, building from source avoids downloaded-app Gatekeeper restrictions.
+
 
 ## Use Rectangle
 
@@ -134,9 +163,9 @@ Remove the flag to allow new tabs to start a tunnel if a profile is installed. C
 
 ## Development
 
-### Update the Windows client
+### Update the desktop client
 
-**Settings → Updates** shows the installed version. Choose **Check for updates**, then **Update** if the official repository has a higher version. Rectangle checks out the exact revision advertised during the check and builds it with Cargo. When the build succeeds, it parks your tabs, replaces the client executable, and restarts. Updates require Git, Rust/Cargo, the same Windows build tools as the initial build, and a writable client executable directory. A failed build keeps the installed version and shows the path to the build log.
+**Settings → Updates** shows the installed version. Choose **Check for updates**, then **Update** if the official repository has a higher version. Rectangle checks out the exact revision advertised during the check and builds it with Cargo. When the build succeeds, it parks your tabs, replaces the client executable, and restarts. Updates require Git, Rust/Cargo, platform build tools (Apple Command Line Tools on Mac; MSVC and Windows SDK on Windows), and a writable client executable directory. Both platforms fetch the exact checked GitHub revision, build natively with the lockfile, update configured servers, park tabs, replace the executable, and restart. macOS uses a shell helper and Windows uses PowerShell. Keep Rust installed for subsequent updates; these are source-built updates, not prebuilt downloads. Mac installation errors are recorded in `updates/<id>/install-error.txt` beneath the settings directory. A failed build keeps the installed version and shows the path to the build log.
 
 Starting with 0.1.10, **Settings → Updates** builds the desktop client first and updates configured servers that are behind. Servers fetch the matching revision through the official GitHub repository, serialize concurrent requests, and return immediately when their installed version is already at or above the requested one. Changed images build before the host activates the new files. Running containers and VPN settings stay in place; new containers use the new images. If a server fails, Rectangle keeps the current desktop version and can retry without rebuilding the prepared desktop binary.
 

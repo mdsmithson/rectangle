@@ -118,9 +118,17 @@ impl Shares {
                 ui.close();
             }
             if let Some(existing) = existing.filter(|share| !share.pending) {
-                let path = format!(r"\\{address}\{}", existing.name);
+                let path = if cfg!(target_os = "macos") {
+                    format!("smb://{address}/{}", existing.name)
+                } else {
+                    format!(r"\\{address}\{}", existing.name)
+                };
                 if ui
-                    .button("Copy Windows path")
+                    .button(if cfg!(target_os = "macos") {
+                        "Copy SMB address"
+                    } else {
+                        "Copy Windows path"
+                    })
                     .on_hover_text(&path)
                     .clicked()
                 {
