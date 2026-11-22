@@ -79,7 +79,7 @@ open "$HOME/Applications/Rectangle.app"
 
 Keep the app in a writable location such as `~/Applications` so it can update itself. Configure the same Linux server in Settings → Connections with this Mac's own SSH key and verified host key. The Linux Docker host remains separate; running the client on Apple Silicon does not require moving or rebuilding your server containers. Native Intel Mac builds use the same commands on an Intel Mac.
 
-Mac audio uses CoreAudio. Downloads use a native Save As dialog, server meters open Terminal, and previews require Brave Browser in `/Applications` or `~/Applications`. macOS may ask for permission to control Terminal. Command+T/W opens/closes tabs; Command+C/V/X integrates with the remote clipboard.
+Mac audio uses CoreAudio. Downloads use a native Save As dialog, server meters open Terminal, and previews require Brave Browser in `/Applications` or `~/Applications`. macOS may ask for permission to control Terminal. Quit Rectangle, Command+Q, and the red window close button all wait for tab parking before exiting, so reopening resumes the running browser rather than creating a fresh container. Normal parked sessions still expire after 30 minutes. Force Quit cannot perform this cleanup. Command+T/W opens/closes tabs; Command+C/V/X integrates with the remote clipboard.
 
 Settings are stored in `~/Library/Application Support/Rectangle/` on Mac. Windows keeps `%LOCALAPPDATA%\Rectangle`. Local workspace layouts and SSH identities belong to each computer; saved server sessions can be reopened from either client.
 

@@ -11,6 +11,8 @@ mod images;
 mod launch_trace;
 #[cfg(target_os = "macos")]
 mod mac_audio;
+#[cfg(target_os = "macos")]
+mod mac_quit;
 mod mark;
 mod memory;
 mod navigation;
@@ -476,6 +478,8 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             launch_trace::checkpoint("graphics-ready");
+            #[cfg(target_os = "macos")]
+            mac_quit::install(&cc.egui_ctx)?;
             design::theme(&cc.egui_ctx);
             let mut app = Rectangle {
                 workspace_state,

@@ -1,6 +1,6 @@
 [package]
 name = "rectangle"
-version = "0.1.29"
+version = "0.1.30"
 edition = "2024"
 license = "Apache-2.0"
 description = "A desktop client for browser and terminal sessions on your own Linux server"
@@ -23,6 +23,7 @@ windows-sys = { version = "=0.61.2", features = ["Win32_Media_Audio", "Win32_UI_
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = "=0.18.2"
+objc2 = "=0.6.5"
 
 [profile.release]
 lto = "thin"
