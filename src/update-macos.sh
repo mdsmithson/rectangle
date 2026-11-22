@@ -31,6 +31,8 @@ build)
     unset CARGO_BUILD_TARGET
     export CARGO_TARGET_DIR="$root/target"
     cargo build --release --locked
+    sh scripts/package-macos.sh
+    ditto "$root/target/release/Rectangle.app" "$root/Rectangle.app"
     cp "$root/target/release/rectangle" "$root/rectangle"
     chmod 755 "$root/rectangle"
     /usr/bin/codesign --force --sign - "$root/rectangle"
@@ -48,6 +50,46 @@ install)
         if [ "$count" -gt 60 ]; then echo 'Rectangle did not exit in time' >&2; exit 1; fi
         sleep 1
     done
+    # App installations replace the complete signed bundle, including icons and
+    # metadata. Replacing only its executable invalidates the resource seal.
+    bundle=$(dirname "$(dirname "$(dirname "$target")")")
+    payload=$(dirname "$candidate")/Rectangle.app
+    if [ -f "$bundle/Contents/Info.plist" ] && [ -d "$payload" ]; then
+        stage=$(mktemp -d "$bundle.update.XXXXXX")
+        backup_bundle="$stage/previous.app"
+        finish_bundle() {
+            code=$?
+            trap - EXIT
+            if [ "$code" -ne 0 ]; then
+                if [ -d "$backup_bundle" ]; then
+                    rm -rf "$bundle"
+                    mv "$backup_bundle" "$bundle"
+                fi
+                echo 'Bundle update failed; previous application preserved.' >&2
+            fi
+            rm -rf "$stage"
+            if [ "$code" -eq 0 ]; then
+                rm -rf "$payload"
+                rm -f "$candidate"
+            fi
+            cd "$RECTANGLE_UPDATE_CWD"
+            "$target" "$@" </dev/null >/dev/null 2>>"$log" &
+            exit "$code"
+        }
+        trap 'finish_bundle "$@"' EXIT
+        ditto "$payload" "$stage/next.app"
+        /usr/bin/codesign --verify --deep --strict "$stage/next.app"
+        mv "$bundle" "$backup_bundle"
+        mv "$stage/next.app" "$bundle"
+        touch "$bundle"
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$bundle" || true
+        exit 0
+    fi
+    if [ -f "$bundle/Contents/Info.plist" ]; then
+        echo 'The update is missing its signed application bundle; previous application preserved.' >&2
+        "$target" "$@" </dev/null >/dev/null 2>>"$log" &
+        exit 1
+    fi
     staged=$(mktemp "$target.XXXXXX")
     backup=$(mktemp "$target.backup.XXXXXX")
     trap 'rm -f "$staged"' EXIT

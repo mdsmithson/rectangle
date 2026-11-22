@@ -83,7 +83,7 @@ Mac audio uses CoreAudio. Downloads use a native Save As dialog, server meters o
 
 Settings are stored in `~/Library/Application Support/Rectangle/` on Mac. Windows keeps `%LOCALAPPDATA%\Rectangle`. Local workspace layouts and SSH identities belong to each computer; saved server sessions can be reopened from either client.
 
-CI builds and tests Windows x64, Apple Silicon, and Intel Mac clients on every push and pull request. Download the matching artifact from the successful GitHub Actions run. Mac bundles use local ad-hoc signing; they are not Developer ID signed or notarized. For initial installation, building from source avoids downloaded-app Gatekeeper restrictions.
+CI builds and tests Windows x64, Apple Silicon, and Intel Mac clients on every push and pull request. Download the matching artifact from the successful GitHub Actions run. Mac bundles include a Retina `.icns` icon for Finder and the Dock, generated from the same artwork as the running app. Bundle updates replace the complete signed app, preserving icons and metadata. Mac bundles use local ad-hoc signing; they are not Developer ID signed or notarized. For initial installation, building from source avoids downloaded-app Gatekeeper restrictions.
 
 
 ## Use Rectangle

@@ -24,8 +24,8 @@ jobs:
       - run: cargo +stable build --release --locked
       - if: runner.os == 'macOS'
         run: |
-          python3 -m unittest discover -s scripts
           sh scripts/package-macos.sh
+          python3 -m unittest discover -s scripts
           ditto -c -k --keepParent target/release/Rectangle.app target/release/Rectangle-macos.zip
       - uses: actions/upload-artifact@v4
         with:
@@ -40,6 +40,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: |
           python3 -m unittest discover -s server
-          for file in server/install.sh server/setup-oracle.sh server/rectangle-session server/rectangle-proton server/entrypoint server/agent-entrypoint src/update-macos.sh scripts/package-macos.sh; do
+          for file in server/install.sh server/setup-oracle.sh server/rectangle-session server/rectangle-proton server/entrypoint server/agent-entrypoint src/update-macos.sh scripts/package-macos.sh scripts/macos-icon.sh; do
             sh -n "$file" || exit 1
           done

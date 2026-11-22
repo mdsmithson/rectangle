@@ -450,7 +450,15 @@ mod tests {
 pub fn install(candidate: &Path) -> io::Result<()> {
     let target = std::env::current_exe()?;
     // Fail before closing the UI if this installation cannot be replaced.
-    let probe = target.with_extension(format!("update-probe-{}", std::process::id()));
+    let bundle = target
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent);
+    let probe = if let Some(bundle) = bundle.filter(|p| p.join("Contents/Info.plist").is_file()) {
+        bundle.with_extension(format!("update-probe-{}", std::process::id()))
+    } else {
+        target.with_extension(format!("update-probe-{}", std::process::id()))
+    };
     fs::OpenOptions::new()
         .create_new(true)
         .write(true)

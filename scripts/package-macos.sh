@@ -2,15 +2,18 @@
 # Run from the repository root after cargo build --release --locked.
 set -eu
 version=$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -1)
-app=target/release/Rectangle.app
-mkdir -p "$app/Contents/MacOS"
-cp target/release/rectangle "$app/Contents/MacOS/rectangle"
+build_root=${CARGO_TARGET_DIR:-target}
+app="$build_root/release/Rectangle.app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+sh scripts/macos-icon.sh "$app/Contents/Resources/Rectangle.icns"
+cp "$build_root/release/rectangle" "$app/Contents/MacOS/rectangle"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>rectangle</string>
 <key>CFBundleIdentifier</key><string>com.mdsmithson.rectangle</string>
+<key>CFBundleIconFile</key><string>Rectangle.icns</string>
 <key>CFBundleName</key><string>Rectangle</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
@@ -20,5 +23,5 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 # This is a local ad-hoc signature, not Developer ID signing or notarization.
-codesign --force --sign - "$app/Contents/MacOS/rectangle"
+codesign --force --sign - "$app"
 printf '%s\n' "$app"
