@@ -96,3 +96,18 @@ fn output<T: cpal::SizedSample + cpal::FromSample<f32>>(
         }
     }
 }
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires the Mac default audio output device"]
+fn queues_silent_pcm_on_coreaudio() {
+    let mut ready = false;
+    let error = play(
+        io::Cursor::new(vec![0; 3840 * 12]),
+        &AtomicU8::new(100),
+        || ready = true,
+    )
+    .unwrap_err();
+    assert!(ready, "CoreAudio did not start: {error}");
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+}

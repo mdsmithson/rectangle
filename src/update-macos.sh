@@ -33,6 +33,7 @@ build)
     cargo build --release --locked
     cp "$root/target/release/rectangle" "$root/rectangle"
     chmod 755 "$root/rectangle"
+    /usr/bin/codesign --force --sign - "$root/rectangle"
     printf '%s\n' "$RECTANGLE_UPDATE_VERSION" > "$root/version.txt"
     ;;
 install)
