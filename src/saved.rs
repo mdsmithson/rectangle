@@ -67,13 +67,16 @@ pub fn parse_parked(output: &str) -> io::Result<Vec<Parked>> {
 fn parked_list_preserves_always_on_and_reads_legacy_records() {
     let id = "1234567890abcdef1234567890abcdef";
     let entries = parse_parked(&format!(
-        "RECTPARK1\n{id} 4167656e74 {id} 0 - 8080 always-on\n{id} 4167656e74 {id} 0 - 8080\n"
+        "RECTPARK1\n{id} 4167656e74 {id} 0 - 8080 always-on\n{id} 4167656e74 {id} 0 - 8080\n{id} 42726f77736572 {id} 0 left - always-on\n"
     ))
     .unwrap();
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].agent_port, Some(8080));
     assert!(entries[0].always_on);
     assert!(!entries[1].always_on);
+    assert!(entries[2].always_on);
+    assert_eq!(entries[2].agent_port, None);
+    assert_eq!(entries[2].snap, Some(crate::tiling::Snap::Left));
 }
 
 #[cfg(test)]
