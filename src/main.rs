@@ -4010,20 +4010,6 @@ impl Rectangle {
                         }
                     }
                     ui.separator();
-                    let mut always_on = tab.always_on;
-                    if ui
-                        .add_enabled(
-                            tab.ran && tab.session.is_some() && ready,
-                            egui::Checkbox::new(&mut always_on, "Always on"),
-                        )
-                        .on_hover_text(
-                            "Keep the Agent running while idle or after Rectangle closes.",
-                        )
-                        .changed()
-                    {
-                        action = Some(TabAction::ToggleAlwaysOn);
-                        ui.close();
-                    }
                     if ui
                         .add_enabled(
                             tab.session.is_some() && ready,
@@ -4057,6 +4043,18 @@ impl Rectangle {
                         ui.close();
                     }
                     ui.separator();
+                }
+                let mut always_on = tab.always_on;
+                if ui
+                    .add_enabled(
+                        tab.ran && tab.session.is_some() && ready,
+                        egui::Checkbox::new(&mut always_on, "Always on"),
+                    )
+                    .on_hover_text("Keep this tab running while idle or after Rectangle closes.")
+                    .changed()
+                {
+                    action = Some(TabAction::ToggleAlwaysOn);
+                    ui.close();
                 }
                 ui.menu_button("Snap tab", |ui| {
                     for slot in Snap::ALL {

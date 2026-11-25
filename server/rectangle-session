@@ -203,10 +203,13 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
             printf '%s %s %s %s' "$id" "$title" "$keep" "$expiry"
             agent_port=$(docker inspect -f '{{index .Config.Labels "rectangle.agent-port"}}' "rectangle-tab-$id" 2>/dev/null || :)
             case $layout in left|right|tl|tr|bl|br) ;; *) layout=- ;; esac
-            if [ "$layout" != - ] || [ -n "$agent_port" ]; then printf ' %s' "$layout"; fi
+            if [ "$layout" != - ] || [ -n "$agent_port$always_on" ]; then printf ' %s' "$layout"; fi
             if [ -n "$agent_port" ]; then printf ' %s' "$agent_port"; fi
             if [ -n "$agent_port" ] && [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-flavor"}}' "rectangle-tab-$id")" = codex ]; then printf ' codex'; fi
-            if [ -n "$always_on" ] && [ -n "$agent_port" ]; then printf ' %s' "$always_on"; fi
+            if [ -n "$always_on" ]; then
+                [ -n "$agent_port" ] || printf ' -'
+                printf ' %s' "$always_on"
+            fi
             if [ -n "$agent_port" ] && [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-view"}}' "rectangle-tab-$id")" = files ]; then
                 printf ' files'
             fi
@@ -223,7 +226,7 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
             if read_parked "$token" && [ "$expiry" = 0 ]; then
                 valid_token "$keep" || exit 1
                 if flock -n "$config/profile-$keep.lock" true; then
-                    echo 'Resume this Agent tab before turning off Always on.' >&2
+                    echo 'Resume this tab before turning off Always on.' >&2
                     exit 1
                 fi
                 rm -f -- "$sessions/$token/parked"
@@ -243,8 +246,10 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
         valid_token "$keep" && [ -f "$reservation/runtime" ] ||
             { echo 'This tab is not running with parking support. Open it again first.' >&2; exit 1; }
         if [ "$operation" = always-on ]; then
-            [ "$(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "rectangle-tab-$token" 2>/dev/null || :)" = agent ] ||
-                { echo 'Always on is available for running Agent tabs.' >&2; exit 1; }
+            case $(docker inspect -f '{{index .Config.Labels "rectangle.role"}}' "rectangle-tab-$token" 2>/dev/null || :) in
+                agent|browser) ;;
+                *) echo 'Always on is available for running Browser and Agent tabs.' >&2; exit 1 ;;
+            esac
             expiry=0
         elif [ -f "$reservation/parked" ]; then
             if ! (read_parked "$token" && [ "$expiry" = 0 ]); then printf 'OK\n'; exit; fi
