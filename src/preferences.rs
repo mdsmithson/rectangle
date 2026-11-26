@@ -1,4 +1,4 @@
-use crate::{AgentResolution, Connection, saved};
+use crate::{TabResolution, Connection, saved};
 use eframe::egui;
 use std::{
     collections::VecDeque,
@@ -26,7 +26,7 @@ impl Field {
 }
 
 pub struct Snapshot {
-    pub resolution: Option<AgentResolution>,
+    pub resolution: Option<TabResolution>,
     pub smooth: bool,
     pub folder: Option<String>,
 }
@@ -39,7 +39,7 @@ impl Snapshot {
         }
         let resolution = match lines.next() {
             Some("-") => None,
-            Some(value) => Some(AgentResolution::parse(value).ok_or_else(invalid)?),
+            Some(value) => Some(TabResolution::parse(value).ok_or_else(invalid)?),
             None => return Err(invalid()),
         };
         let smooth = match lines.next() {
@@ -217,7 +217,7 @@ mod tests {
         let folder = "/agent/home/workspace/日本語 files";
         let snapshot =
             Snapshot::parse(&format!("RECTPREF1\nqhd\non\n{}\n", saved::encode(folder))).unwrap();
-        assert!(snapshot.resolution == Some(AgentResolution::Qhd));
+        assert!(snapshot.resolution == Some(TabResolution::Qhd));
         assert!(snapshot.smooth);
         assert_eq!(snapshot.folder.as_deref(), Some(folder));
         for data in [
@@ -245,8 +245,8 @@ mod tests {
 
     #[test]
     fn modes_round_trip_and_loading_does_not_erase_local_choices() {
-        for (mode, _) in AgentResolution::OPTIONS {
-            assert!(AgentResolution::parse(mode.code()) == Some(mode));
+        for (mode, _) in TabResolution::OPTIONS {
+            assert!(TabResolution::parse(mode.code()) == Some(mode));
         }
         let mut state = State::default();
         state.started = true;
@@ -259,7 +259,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(state.ready && state.changed_locally(Field::Resolution));
-        assert!(snapshot.resolution == Some(AgentResolution::Uhd));
+        assert!(snapshot.resolution == Some(TabResolution::Uhd));
     }
 
     #[test]

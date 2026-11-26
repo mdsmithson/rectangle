@@ -10,7 +10,8 @@ import tempfile
 
 ROOT = Path.home() / ".config/rectangle"
 ID = re.compile(r"[0-9a-f]{32}")
-RESOLUTIONS = {"tile", "host", "uhd", "qhd", "full-hd", "dci-2k", "one-k"}
+TILE_RESOLUTIONS = {"tile", "half-tile", "third-tile"}
+RESOLUTIONS = TILE_RESOLUTIONS | {"host", "uhd", "qhd", "full-hd", "dci-2k", "one-k"}
 
 
 def resolve(identity):
@@ -81,7 +82,11 @@ def request(identity, field, value=""):
             print(data.get("smooth", "off"))
             print(data["folder"].encode().hex() if "folder" in data else "-")
             return
-        if (field == "smooth" and role != "browser") or (field in {"folder", "resolution"} and role != "agent"):
+        if (
+            (field == "smooth" and role != "browser")
+            or (field == "folder" and role != "agent")
+            or (field == "resolution" and role == "browser" and value not in TILE_RESOLUTIONS)
+        ):
             raise ValueError("This preference is not available for this tab type.")
         data[field] = validate(field, value)
         write(identity, data)

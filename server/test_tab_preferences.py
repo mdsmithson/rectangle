@@ -44,6 +44,11 @@ class TabPreferencesTests(unittest.TestCase):
         self.assertIn("\nqhd\n", self.request(AGENT).stdout)
         self.assertEqual(self.request(BROWSER, "smooth", "on").stdout, "OK\n")
         self.assertIn("\non\n", self.request(BROWSER).stdout)
+        for profile in (BROWSER, AGENT):
+            for resolution in ("half-tile", "third-tile", "tile"):
+                self.assertEqual(self.request(profile, "resolution", resolution).stdout, "OK\n")
+                self.assertIn(f"\n{resolution}\n", self.request(profile).stdout)
+        self.assertIn("\non\n", self.request(BROWSER).stdout)
         record = self.root / "tab-preferences" / (AGENT + ".json")
         self.assertEqual(record.stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.root / "saved" / AGENT).read_text(), "4167656e74 agent:demo:4007\n")
