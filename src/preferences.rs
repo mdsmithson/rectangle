@@ -1,4 +1,4 @@
-use crate::{TabResolution, Connection, saved};
+use crate::{Connection, TabResolution, saved};
 use eframe::egui;
 use std::{
     collections::VecDeque,

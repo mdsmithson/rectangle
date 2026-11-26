@@ -4440,7 +4440,9 @@ impl Rectangle {
                 .and_then(Session::desktop_size)
                 .unwrap_or(rfb::Resolution(tab.size[0], tab.size[1]));
             let known_mode = tab.preferences.received
-                || tab.preferences.changed_locally(preferences::Field::Resolution)
+                || tab
+                    .preferences
+                    .changed_locally(preferences::Field::Resolution)
                 || tab.preferences.changed_locally(preferences::Field::Smooth);
             let tolerance = if tab.tab_resolution.follows_tile() {
                 1
