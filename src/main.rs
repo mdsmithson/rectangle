@@ -135,7 +135,7 @@ enum TabAction {
     Volume(u8),
     Navigate(&'static str),
     ToggleVideoMode,
-    AgentResolution(AgentResolution),
+    TabResolution(TabResolution),
     ToggleAlwaysOn,
     AgentMemory,
     OpenAgentView(AgentView),
@@ -190,9 +190,11 @@ impl Tab {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum AgentResolution {
+enum TabResolution {
     #[default]
     MatchTile,
+    MatchHalfTile,
+    MatchThirdTile,
     MatchHost,
     Uhd,
     Qhd,
@@ -201,10 +203,12 @@ enum AgentResolution {
     OneK,
 }
 
-impl AgentResolution {
+impl TabResolution {
     fn code(self) -> &'static str {
         match self {
             Self::MatchTile => "tile",
+            Self::MatchHalfTile => "half-tile",
+            Self::MatchThirdTile => "third-tile",
             Self::MatchHost => "host",
             Self::Uhd => "uhd",
             Self::Qhd => "qhd",
@@ -219,20 +223,41 @@ impl AgentResolution {
             .map(|(mode, _)| mode)
             .find(|mode| mode.code() == value)
     }
-    const OPTIONS: [(Self, &str); 7] = [
+    const OPTIONS: [(Self, &str); 9] = [
         (Self::Uhd, "4K UHD (3840 × 2160)"),
         (Self::Qhd, "QHD (2560 × 1440)"),
         (Self::FullHd, "Full HD (1920 × 1080)"),
         (Self::Dci2k, "2K (2048 × 1080)"),
         (Self::OneK, "1K (1024 × 576)"),
         (Self::MatchTile, "Match Tile"),
+        (Self::MatchHalfTile, "Match Half Tile"),
+        (Self::MatchThirdTile, "Match Third Tile"),
         (Self::MatchHost, "Match Host"),
     ];
 
-    fn target(self, tile: rfb::Resolution, host: Option<egui::Vec2>) -> rfb::Resolution {
+    fn follows_tile(self) -> bool {
+        matches!(
+            self,
+            Self::MatchTile | Self::MatchHalfTile | Self::MatchThirdTile
+        )
+    }
+
+    fn target(self, tile: Vec2, host: Option<Vec2>) -> rfb::Resolution {
         match self {
-            Self::MatchTile => tile,
-            Self::MatchHost => host.map_or(tile, |size| rfb::Resolution::fit(size.x, size.y)),
+            Self::MatchHalfTile | Self::MatchThirdTile => {
+                let fraction: f32 = if self == Self::MatchHalfTile {
+                    0.5
+                } else {
+                    1.0 / 3.0
+                };
+                let scale = fraction.max(320.0 / tile.x).max(200.0 / tile.y);
+                rfb::Resolution::fit((tile.x * scale).max(320.0), (tile.y * scale).max(200.0))
+            }
+            Self::MatchTile => rfb::Resolution::fit(tile.x.max(320.0), tile.y.max(200.0)),
+            Self::MatchHost => host.map_or_else(
+                || Self::MatchTile.target(tile, None),
+                |size| rfb::Resolution::fit(size.x, size.y),
+            ),
             Self::Uhd => rfb::Resolution(3840, 2160),
             Self::Qhd => rfb::Resolution(2560, 1440),
             Self::FullHd => rfb::Resolution(1920, 1080),
@@ -387,7 +412,7 @@ struct Tab {
     muted: bool,
     volume: Option<u8>,
     video_mode: bool,
-    agent_resolution: AgentResolution,
+    tab_resolution: TabResolution,
     always_on: bool,
     backend: Backend,
     connection: Connection,
@@ -921,7 +946,7 @@ impl Rectangle {
                             .changed_locally(preferences::Field::Resolution)
                             && let Some(resolution) = snapshot.resolution
                         {
-                            tab.agent_resolution = resolution;
+                            tab.tab_resolution = resolution;
                         }
                         if tab.agent_port.is_none()
                             && !tab.preferences.changed_locally(preferences::Field::Smooth)
@@ -1133,10 +1158,10 @@ impl Rectangle {
                     profile: entry.profile,
                     agent_port: entry.agent_port,
                     codex: entry.codex,
-                    agent_resolution: if entry.codex {
-                        AgentResolution::Qhd
+                    tab_resolution: if entry.codex {
+                        TabResolution::Qhd
                     } else {
-                        AgentResolution::MatchTile
+                        TabResolution::MatchTile
                     },
                     agent_view: if entry.file_manager {
                         AgentView::Files
@@ -1362,10 +1387,10 @@ impl Rectangle {
                     backend,
                     agent_port,
                     codex,
-                    agent_resolution: if codex {
-                        AgentResolution::Qhd
+                    tab_resolution: if codex {
+                        TabResolution::Qhd
                     } else {
-                        AgentResolution::MatchTile
+                        TabResolution::MatchTile
                     },
                     agent_view: if file_manager {
                         AgentView::Files
@@ -1524,7 +1549,7 @@ impl Rectangle {
                     title: kind.label().into(),
                     agent_port: Some(port),
                     codex: owner.codex,
-                    agent_resolution: owner.agent_resolution,
+                    tab_resolution: owner.tab_resolution,
                     agent_view: kind,
                     agent_owner: Some(owner_id),
                     agent_parent_title: Some(owner.title.clone()),
@@ -4110,27 +4135,26 @@ impl Rectangle {
                     action = Some(TabAction::Park);
                     ui.close();
                 }
-                if tab.agent_port.is_some() {
-                    ui.menu_button("Resolution", |ui| {
-                        for (resolution, label) in AgentResolution::OPTIONS {
-                            let response =
-                                ui.selectable_label(tab.agent_resolution == resolution, label);
-                            let response = match resolution {
-                                AgentResolution::MatchTile => {
-                                    response.on_hover_text("Follow the size of this tile.")
-                                }
-                                AgentResolution::MatchHost => response.on_hover_text(
-                                    "Use the resolution of the monitor showing Rectangle.",
-                                ),
-                                _ => response,
-                            };
-                            if response.clicked() {
-                                action = Some(TabAction::AgentResolution(resolution));
-                                ui.close();
-                            }
+                ui.menu_button("Resolution", |ui| {
+                    for (resolution, label) in TabResolution::OPTIONS
+                        .into_iter()
+                        .filter(|(mode, _)| tab.agent_port.is_some() || mode.follows_tile())
+                    {
+                        let selected = tab.tab_resolution == resolution;
+                        let response = ui.selectable_label(selected, label);
+                        let response = match resolution {
+                            TabResolution::MatchHost => response.on_hover_text(
+                                "Use the resolution of the monitor showing Rectangle.",
+                            ),
+                            _ => response,
+                        };
+                        if response.clicked() {
+                            action = Some(TabAction::TabResolution(resolution));
+                            ui.close();
                         }
-                    });
-                } else {
+                    }
+                });
+                if tab.agent_port.is_none() {
                     if ui
                         .selectable_label(tab.video_mode, "Smooth video (up to 1080p)")
                         .on_hover_text(
@@ -4291,8 +4315,8 @@ impl Rectangle {
                     );
                 }
             }
-            TabAction::AgentResolution(resolution) => {
-                tab.agent_resolution = resolution;
+            TabAction::TabResolution(resolution) => {
+                tab.tab_resolution = resolution;
                 tab.preferences.changed(preferences::Field::Resolution);
                 if let Some(target) = tab
                     .profile
@@ -4396,20 +4420,18 @@ impl Rectangle {
             }
             let (pane, _) = ui.allocate_exact_size(available, Sense::hover());
             let dpi = ctx.pixels_per_point();
-            let tile = rfb::Resolution::fit(
-                ((pane.right() * dpi).round() - (pane.left() * dpi).round()).max(320.0),
-                ((pane.bottom() * dpi).round() - (pane.top() * dpi).round()).max(200.0),
-            );
-            let desired = if tab.agent_port.is_some() {
-                let host = ctx
-                    .input(|input| input.viewport().monitor_size)
-                    .map(|size| size * dpi);
-                tab.agent_resolution.target(tile, host)
-            } else if tab.video_mode {
-                tile.video_size()
-            } else {
-                tile
-            };
+            let tile = Vec2::new(
+                (pane.right() * dpi).round() - (pane.left() * dpi).round(),
+                (pane.bottom() * dpi).round() - (pane.top() * dpi).round(),
+            )
+            .max(Vec2::splat(1.0));
+            let host = ctx
+                .input(|input| input.viewport().monitor_size)
+                .map(|size| size * dpi);
+            let mut desired = tab.tab_resolution.target(tile, host);
+            if tab.video_mode {
+                desired = desired.video_size();
+            }
             let now = Instant::now();
             let can_resize = tab.session.as_ref().is_some_and(Session::supports_resize);
             let remote = tab
@@ -4420,17 +4442,13 @@ impl Rectangle {
             let known_mode = tab.preferences.received
                 || tab
                     .preferences
-                    .changed_locally(if tab.agent_port.is_some() {
-                        preferences::Field::Resolution
-                    } else {
-                        preferences::Field::Smooth
-                    });
-            let tolerance =
-                if tab.agent_port.is_none() || tab.agent_resolution == AgentResolution::MatchTile {
-                    1
-                } else {
-                    0
-                };
+                    .changed_locally(preferences::Field::Resolution)
+                || tab.preferences.changed_locally(preferences::Field::Smooth);
+            let tolerance = if tab.tab_resolution.follows_tile() {
+                1
+            } else {
+                0
+            };
             let plan = tab.sizing.plan(
                 now,
                 desired,
@@ -4465,7 +4483,16 @@ impl Rectangle {
                 return;
             }
             // A resize is asynchronous, and older parked desktops can't resize.
-            let rect = design::fit_desktop(pane, tab.size);
+            let rect = if matches!(
+                tab.tab_resolution,
+                TabResolution::MatchHalfTile | TabResolution::MatchThirdTile
+            ) && tab.size[0].abs_diff(desired.0) <= tolerance
+                && tab.size[1].abs_diff(desired.1) <= tolerance
+            {
+                pane
+            } else {
+                design::fit_desktop(pane, tab.size)
+            };
             tab.page_rect = Some(rect);
             design::display(ui, texture.id(), rect);
             if let Some(error) = tab.clipboard_error {
@@ -4618,13 +4645,14 @@ mod tests {
             let (_send, receive) = std::sync::mpsc::channel();
             app.job = busy.then_some((Job::CloneTab(Backend::Primary), receive));
             // Keep the dummy job alive without contacting a host.
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 900.0))),
                     ..Default::default()
                 },
                 |ui| app.workspace(ui),
             );
+            output.textures_delta.clear();
             areas.push(app.tabs[0].page_rect.unwrap());
         }
         assert_eq!(areas[0], areas[1]);
@@ -4632,24 +4660,37 @@ mod tests {
     }
 
     #[test]
-    fn agent_resolution_selects_fixed_modes_or_tracks_tile_and_monitor_pixels() {
+    fn tab_resolution_selects_fixed_modes_or_tracks_tile_and_monitor_pixels() {
         use rfb::Resolution;
-        let tile = Resolution(960, 540);
+        let tile = Vec2::new(1200.0, 720.0);
         let host = Some(Vec2::new(2560.0, 1440.0));
         for (mode, expected) in [
-            (AgentResolution::Uhd, Resolution(3840, 2160)),
-            (AgentResolution::Qhd, Resolution(2560, 1440)),
-            (AgentResolution::FullHd, Resolution(1920, 1080)),
-            (AgentResolution::Dci2k, Resolution(2048, 1080)),
-            (AgentResolution::OneK, Resolution(1024, 576)),
-            (AgentResolution::MatchHost, Resolution(2560, 1440)),
-            (AgentResolution::MatchTile, tile),
+            (TabResolution::Uhd, Resolution(3840, 2160)),
+            (TabResolution::Qhd, Resolution(2560, 1440)),
+            (TabResolution::FullHd, Resolution(1920, 1080)),
+            (TabResolution::Dci2k, Resolution(2048, 1080)),
+            (TabResolution::OneK, Resolution(1024, 576)),
+            (TabResolution::MatchHost, Resolution(2560, 1440)),
+            (TabResolution::MatchTile, Resolution(1200, 720)),
+            (TabResolution::MatchHalfTile, Resolution(600, 360)),
+            (TabResolution::MatchThirdTile, Resolution(400, 240)),
         ] {
             assert_eq!(mode.target(tile, host), expected);
         }
-        assert_eq!(AgentResolution::MatchHost.target(tile, None), tile);
         assert_eq!(
-            AgentResolution::MatchHost.target(tile, Some(Vec2::new(7680.0, 4320.0))),
+            TabResolution::MatchHost.target(tile, None),
+            Resolution(1200, 720)
+        );
+        assert_eq!(
+            TabResolution::MatchThirdTile.target(Vec2::new(960.0, 540.0), None),
+            Resolution(356, 200)
+        );
+        assert_eq!(
+            TabResolution::MatchHalfTile.target(Vec2::new(7680.0, 4320.0), None),
+            Resolution(3840, 2160)
+        );
+        assert_eq!(
+            TabResolution::MatchHost.target(tile, Some(Vec2::new(7680.0, 4320.0))),
             Resolution(3965, 2230)
         );
     }
