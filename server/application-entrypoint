@@ -2,8 +2,7 @@
 set -eu
 umask 077
 mkdir -p "$HOME/workspace"
-export XDG_RUNTIME_DIR=/tmp/rectangle-runtime
-mkdir -m 700 "$XDG_RUNTIME_DIR"
+test -w "$XDG_RUNTIME_DIR"
 mkdir -m 1777 /tmp/.X11-unix
 mkdir -m 700 /tmp/rectangle-pulse
 cat > /tmp/rectangle-pulse/config.pa <<'PULSE'

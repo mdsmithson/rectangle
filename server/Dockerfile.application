@@ -7,7 +7,7 @@ RUN test "${TARGETARCH:-amd64}" = amd64 \
     && apt-get install -y --no-install-recommends \
         bash build-essential ca-certificates cargo curl elixir erlang-dev firefox-esr \
         git libssl-dev nodejs npm openssh-client pkg-config python3 python3-pip python3-venv \
-        ripgrep ruby ruby-bundler ruby-dev rustc strace vim \
+        ripgrep ruby ruby-bundler ruby-dev rustc vim \
         dbus-x11 fonts-dejavu-core openbox socat tigervnc-standalone-server x11-utils xclip xdotool xterm \
         xfce4-session xfce4-panel xfce4-settings xfdesktop4 xfwm4 thunar xfce4-terminal \
         pulseaudio pulseaudio-utils xdg-user-dirs xdg-utils \
@@ -32,6 +32,6 @@ COPY --chmod=0444 agent-browser.desktop /usr/share/applications/rectangle-agent-
 COPY --chmod=0444 application-wine.desktop /usr/share/applications/rectangle-wine.desktop
 COPY --chmod=0444 application-mimeapps.list /etc/xdg/mimeapps.list
 COPY --chmod=0444 clipboard-stream.py memory-stream.py /opt/rectangle/
-ENV HOME=/agent/home DISPLAY=:99 LANG=C.UTF-8 TERM=xterm-256color BROWSER=/opt/rectangle/agent-browser PULSE_SERVER=unix:/tmp/rectangle-pulse/native
+ENV HOME=/agent/home DISPLAY=:99 LANG=C.UTF-8 TERM=xterm-256color BROWSER=/opt/rectangle/agent-browser PULSE_SERVER=unix:/tmp/rectangle-pulse/native XDG_RUNTIME_DIR=/run/user/10001
 USER 10001:10001
 ENTRYPOINT ["/opt/rectangle/agent-entrypoint"]

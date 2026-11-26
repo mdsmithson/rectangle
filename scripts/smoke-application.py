@@ -102,16 +102,7 @@ def main():
                        "for tool in python3 node ruby elixir erl cargo rustc cc c++ winetricks; "
                        'do command -v "$tool"; done; pactl info')
                 wine_env = ("-e", "WINEDLLOVERRIDES=mscoree,mshtml=")
-                try:
-                    docker("exec", *wine_env, container, "wineboot", "-u", timeout=180)
-                except subprocess.CalledProcessError:
-                    # Report the final syscalls if Wine fails before emitting its own diagnostics.
-                    trace = subprocess.run(
-                        ("docker", "exec", *wine_env, container, "strace", "-f", "wineboot", "-u"),
-                        capture_output=True, text=True, timeout=180,
-                    )
-                    print("\n".join(trace.stderr.splitlines()[-160:]), flush=True)
-                    raise
+                docker("exec", *wine_env, container, "wineboot", "-u", timeout=180)
                 for cmd in (r"C:\windows\system32\cmd.exe", r"C:\windows\syswow64\cmd.exe"):
                     output = docker("exec", *wine_env, container, "wine", cmd, "/c",
                                     "echo Application", timeout=180)

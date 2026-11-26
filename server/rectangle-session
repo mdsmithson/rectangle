@@ -1028,6 +1028,10 @@ except OSError as err:
     sys.exit(f"Could not bind Agent port {sys.argv[2]} to {sys.argv[1]}: {err.strerror}.")
 ' "$bind_ip" "$agent_port"
     network_mode=bridge
+    if [ "$image_id" = application ]; then
+        # Debian Wine checks /run/user/<uid> even when TMPDIR is set.
+        set -- "$@" --tmpfs /run/user/10001:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=10001,gid=10001
+    fi
     set -- "$@" --publish "$bind_ip:$agent_port:$agent_port/tcp" \
         --label "rectangle.agent-port=$agent_port" --env "PORT=$agent_port" \
         --label "rectangle.agent-flavor=$image_id" \
