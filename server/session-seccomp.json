@@ -51,6 +51,12 @@
 	],
 	"syscalls": [
 		{
+			"names": ["clone3"],
+			"action": "SCMP_ACT_ERRNO",
+			"errnoRet": 38,
+			"comment": "Keep clone3 blocked and let libc fall back to the filtered clone syscall."
+		},
+		{
 			"comment": "Allow create user namespaces",
 			"names": [
 				"clone",

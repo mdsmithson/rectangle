@@ -7,11 +7,11 @@ RUN test "${TARGETARCH:-amd64}" = amd64 \
     && apt-get install -y --no-install-recommends \
         bash build-essential ca-certificates cargo curl elixir erlang-dev firefox-esr \
         git libssl-dev nodejs npm openssh-client pkg-config python3 python3-pip python3-venv \
-        ripgrep ruby ruby-bundler ruby-dev rustc vim \
+        ripgrep ruby ruby-bundler ruby-dev rustc strace vim \
         dbus-x11 fonts-dejavu-core openbox socat tigervnc-standalone-server x11-utils xclip xdotool xterm \
         xfce4-session xfce4-panel xfce4-settings xfdesktop4 xfwm4 thunar xfce4-terminal \
         pulseaudio pulseaudio-utils xdg-user-dirs xdg-utils \
-        wine wine64 wine32:i386 fonts-wine winetricks cabextract p7zip-full unzip zenity \
+        wine wine64 wine64-preloader wine32:i386 wine32-preloader:i386 fonts-wine winetricks cabextract p7zip-full unzip zenity \
         libgl1-mesa-dri libgl1-mesa-dri:i386 mesa-vulkan-drivers mesa-vulkan-drivers:i386 \
         libvulkan1 libvulkan1:i386 libpulse0:i386 libasound2-plugins libasound2-plugins:i386 \
     && rm -rf /var/lib/apt/lists/* \
