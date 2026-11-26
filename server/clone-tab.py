@@ -152,7 +152,9 @@ def clone(token, encoded, helper_image, startup=""):
             port = free_port(saved)
             prefix = "rectangle-agent:"
             image = info["Config"]["Image"].removeprefix(prefix)
-            flavor = "codex" if info["Config"]["Image"].startswith("rectangle-codex:") else "demo"
+            flavor = labels.get("rectangle.agent-flavor")
+            if flavor not in {"codex", "application"}:
+                flavor = "codex" if info["Config"]["Image"].startswith("rectangle-codex:") else "demo"
             page = f"agent:{image if ID.fullmatch(image) else flavor}:{port}"
             if labels.get("rectangle.agent-view") == "files":
                 page += ":files"

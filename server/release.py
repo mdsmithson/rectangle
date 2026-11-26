@@ -24,6 +24,9 @@ IMAGES = {
               "agent-mimeapps.list", "clipboard-stream.py", "memory-stream.py"),
     "codex": ("Dockerfile.codex", "codex-entrypoint", "agent-browser", "agent-browser.desktop",
               "agent-mimeapps.list", "clipboard-stream.py", "memory-stream.py"),
+    "application": ("Dockerfile.application", "application-entrypoint", "agent-browser",
+                    "agent-browser.desktop", "application-wine.desktop", "application-mimeapps.list",
+                    "audio-stream", "clipboard-stream.py", "memory-stream.py"),
     "egress": ("Dockerfile.egress", "egress.py"),
     "vpn": ("Dockerfile.vpn", "egress.py", "vpn.py"),
     "proton": ("Dockerfile.proton", "egress.py", "proton.py"),
@@ -83,6 +86,8 @@ def image_tag(server, name, inputs):
 def stage_images(server):
     result = {}
     for name, inputs in IMAGES.items():
+        if name == "application" and os.uname().machine not in {"x86_64", "amd64"}:
+            continue
         if name == "smb" and not (ROOT / "smb/settings.json").is_file():
             continue
         tag = image_tag(server, name, inputs)
@@ -105,7 +110,7 @@ def activate(source, commit, expected):
     if not SHA.fullmatch(commit) or source_version(source) != expected:
         raise ValueError("The checked-out server source does not match the requested release.")
     server = source / "server"
-    for filename in ("rectangle-session", "rectangle-proton", "agent-view", "release-launcher", "codex-entrypoint", "agent-browser"):
+    for filename in ("rectangle-session", "rectangle-proton", "agent-view", "release-launcher", "codex-entrypoint", "agent-browser", "application-entrypoint"):
         command("sh", "-n", server / filename, timeout=10)
     images = stage_images(server)
     releases = ROOT / "releases"
