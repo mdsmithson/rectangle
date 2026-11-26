@@ -77,6 +77,7 @@ fn valid_folder(path: &str) -> bool {
 
 pub struct State {
     pub ready: bool,
+    pub received: bool,
     pub folder: String,
     dirty: [bool; 3],
     started: bool,
@@ -86,6 +87,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             ready: false,
+            received: false,
             folder: DEFAULT_FOLDER.into(),
             dirty: [false; 3],
             started: false,
@@ -124,7 +126,9 @@ impl State {
         }
         let result = take(&mut self.job)?;
         self.ready = true;
-        Some(result.and_then(|data| Snapshot::parse(&data)))
+        let result = result.and_then(|data| Snapshot::parse(&data));
+        self.received = result.is_ok();
+        Some(result)
     }
 }
 

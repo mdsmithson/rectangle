@@ -13,6 +13,9 @@ use std::{
 #[derive(Default)]
 pub struct View {
     pub layout: Option<(u32, u32)>,
+    pub desktop_size: Option<Resolution>,
+    #[cfg(test)]
+    pub resize_requests: u64,
     pub frame: Option<Frame>,
     pub error: Option<String>,
 }
@@ -331,7 +334,13 @@ impl Session {
                     rfb::update(&mut input, &mut frame, &mut decoder)?;
                     let changed = {
                         let mut view = display.lock().unwrap();
-                        let layout_changed = view.layout != frame.layout;
+                        let size = Resolution(frame.width, frame.height);
+                        let geometry_changed = view.desktop_size != Some(size);
+                        let layout_changed = view.layout != frame.layout || geometry_changed;
+                        if geometry_changed {
+                            view.frame = None;
+                        }
+                        view.desktop_size = Some(size);
                         view.layout = frame.layout;
                         if let Some(damage) = frame.dirty {
                             if let Some(pending) = &mut view.frame
@@ -401,10 +410,24 @@ impl Session {
     }
 
     pub fn resize(&self, size: Resolution) -> bool {
-        let layout = self.view.lock().unwrap().layout;
-        layout
+        let view = self.view.lock().unwrap();
+        if view.desktop_size == Some(size) {
+            return false;
+        }
+        let sent = view
+            .layout
             .and_then(|layout| Frame::resize_request(size, layout))
-            .is_some_and(|packet| self.sender.try_send(packet).is_ok())
+            .is_some_and(|packet| self.sender.try_send(packet).is_ok());
+        #[cfg(test)]
+        if sent {
+            let mut view = view;
+            view.resize_requests += 1;
+        }
+        sent
+    }
+
+    pub fn desktop_size(&self) -> Option<Resolution> {
+        self.view.lock().unwrap().desktop_size
     }
 
     pub fn supports_resize(&self) -> bool {
@@ -422,6 +445,146 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a live Rectangle host; creates and cleans up its own browser"]
+    fn parked_size_is_kept_and_a_changed_tile_sends_only_one_resize() {
+        use crate::{
+            resize::{SETTLE, Sizing},
+            saved,
+        };
+        let host = std::env::var("RECTANGLE_SMOKE_HOST").unwrap();
+        let key = std::env::var_os("RECTANGLE_SMOKE_IDENTITY").map(std::path::PathBuf::from);
+        struct Cleanup {
+            host: String,
+            key: Option<std::path::PathBuf>,
+            token: Option<String>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Some(token) = &self.token
+                    && let Ok(task) = saved::run(
+                        &self.host,
+                        self.key.as_deref(),
+                        &format!("stop-park {token}"),
+                        || {},
+                    )
+                {
+                    let _ = task.recv_timeout(Duration::from_secs(15));
+                }
+            }
+        }
+        let mut cleanup = Cleanup {
+            host: host.clone(),
+            key: key.clone(),
+            token: None,
+        };
+        let old = Resolution(1280, 720);
+        let session = Session::start(&host, key.as_deref(), old, || {}).unwrap();
+        cleanup.token = Some(session.token.clone());
+        let wait = |session: &Session, size: Resolution| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let view = session.view.lock().unwrap();
+                assert!(view.error.is_none(), "{:?}", view.error);
+                if let Some(frame) = &view.frame {
+                    assert!(
+                        frame.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255),
+                        "an incomplete framebuffer was published"
+                    );
+                    if (frame.width, frame.height) == (size.0, size.1) {
+                        return;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    let details = format!(
+                        "remote={:?}, frame={:?}, requests={}",
+                        view.desktop_size,
+                        view.frame.as_ref().map(|frame| (frame.width, frame.height)),
+                        view.resize_requests
+                    );
+                    drop(view);
+                    panic!("no complete frame at {size:?}: {details}");
+                }
+                drop(view);
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait(&session, old);
+        let token = session.token.clone();
+        let parked = saved::run(
+            &host,
+            key.as_deref(),
+            &format!("park {token} {} left", saved::encode("Sizing test")),
+            || {},
+        )
+        .unwrap();
+        assert_eq!(
+            parked
+                .recv_timeout(Duration::from_secs(20))
+                .unwrap()
+                .unwrap()
+                .trim(),
+            "OK"
+        );
+        drop(session);
+        thread::sleep(Duration::from_millis(100));
+        let resumed = Session::resume(&host, key.as_deref(), &token, || {}).unwrap();
+        wait(&resumed, old);
+        let now = Instant::now();
+        let mut sizing = Sizing::default();
+        for step in 0..3 {
+            assert!(
+                sizing
+                    .plan(
+                        now + SETTLE * step,
+                        Resolution(900, 600),
+                        old,
+                        old,
+                        false,
+                        true,
+                        0
+                    )
+                    .request
+                    .is_none()
+            );
+        }
+        sizing.plan(now + SETTLE * 3, old, old, old, true, true, 0);
+        assert!(
+            sizing
+                .plan(now + SETTLE * 4, old, old, old, true, true, 0)
+                .show
+        );
+        assert_eq!(resumed.view.lock().unwrap().resize_requests, 0);
+        assert!(
+            !resumed.resize(old),
+            "an already-correct size must not send a packet"
+        );
+        // Exercise resized-frame completion with Tight compression as well.
+        assert!(resumed.send(rfb::encodings(true), false));
+        let new = Resolution(1152, 768);
+        sizing.plan(now + SETTLE * 5, new, old, old, true, true, 0);
+        let plan = sizing.plan(now + SETTLE * 6, new, old, old, true, true, 0);
+        assert_eq!(plan.request, Some(new));
+        assert!(resumed.resize(new));
+        sizing.sent(new, now + SETTLE * 6);
+        wait(&resumed, new);
+        let plan = sizing.plan(
+            now + SETTLE * 7,
+            new,
+            resumed.desktop_size().unwrap(),
+            new,
+            true,
+            true,
+            0,
+        );
+        assert!(plan.show && plan.request.is_none());
+        assert!(!resumed.resize(new));
+        assert_eq!(resumed.view.lock().unwrap().resize_requests, 1);
+        eprintln!(
+            "Unchanged parked desktop: 0 resize requests; changed tile: 1; all published frames complete."
+        );
+    }
 
     #[test]
     #[ignore = "requires a live Rectangle host and an animated test page"]

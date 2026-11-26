@@ -78,6 +78,36 @@ pub struct Decoder {
     streams: [Option<flate2::Decompress>; 4],
     payload: Vec<u8>,
     pixels: Vec<u8>,
+    coverage: Option<Coverage>,
+}
+
+struct Coverage {
+    width: usize,
+    remaining: usize,
+    painted: Vec<u64>,
+}
+impl Coverage {
+    fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            remaining: width * height,
+            painted: vec![0; (width * height).div_ceil(64)],
+        }
+    }
+    fn paint(&mut self, rect: Damage) {
+        for y in rect.y..rect.bottom {
+            let mut start = y * self.width + rect.x;
+            let end = y * self.width + rect.right;
+            while start < end {
+                let count = (64 - start % 64).min(end - start);
+                let mask = (u64::MAX >> (64 - count)) << (start % 64);
+                let word = &mut self.painted[start / 64];
+                self.remaining -= (mask & !*word).count_ones() as usize;
+                *word |= mask;
+                start += count;
+            }
+        }
+    }
 }
 
 pub fn encodings(video: bool) -> Vec<u8> {
@@ -253,6 +283,7 @@ pub fn update(input: &mut impl Read, frame: &mut Frame, decoder: &mut Decoder) -
             if x != 0 || y != 0 || w != 0 || h != 0 {
                 return Err(invalid("Invalid end marker in display update"));
             }
+            decoder.finish(frame);
             return Ok(());
         }
         if index == MAX_RECTS_PER_UPDATE {
@@ -296,6 +327,7 @@ pub fn update(input: &mut impl Read, frame: &mut Frame, decoder: &mut Decoder) -
                 frame.width = w as u16;
                 frame.height = h as u16;
                 frame.rgba = vec![0; w * h * 4];
+                decoder.coverage = Some(Coverage::new(w, h));
                 frame.dirty = Some(Damage {
                     x: 0,
                     y: 0,
@@ -327,6 +359,9 @@ pub fn update(input: &mut impl Read, frame: &mut Frame, decoder: &mut Decoder) -
         frame.dirty = Some(frame.dirty.map_or(damage, |dirty| dirty.union(damage)));
         if encoding == TIGHT {
             decoder.tight(input, frame, damage)?;
+            if let Some(coverage) = &mut decoder.coverage {
+                coverage.paint(damage);
+            }
             continue;
         }
         for scanline in y..y + h {
@@ -339,7 +374,11 @@ pub fn update(input: &mut impl Read, frame: &mut Frame, decoder: &mut Decoder) -
                 dst.copy_from_slice(&[src[2], src[1], src[0], 255]);
             }
         }
+        if let Some(coverage) = &mut decoder.coverage {
+            coverage.paint(damage);
+        }
     }
+    decoder.finish(frame);
     Ok(())
 }
 
@@ -357,6 +396,27 @@ fn compact_len(input: &mut impl Read) -> io::Result<usize> {
 }
 
 impl Decoder {
+    #[cfg(test)]
+    pub fn needs_full_frame(&self) -> bool {
+        self.coverage.is_some()
+    }
+    fn finish(&mut self, frame: &mut Frame) {
+        if let Some(coverage) = &self.coverage {
+            if coverage.remaining == 0 {
+                frame.dirty = Some(Damage {
+                    x: 0,
+                    y: 0,
+                    right: usize::from(frame.width),
+                    bottom: usize::from(frame.height),
+                });
+                self.coverage = None;
+            } else {
+                // A DesktopSize notification contains no image. Publishing its
+                // newly allocated zero-filled buffer produces a black flash.
+                frame.dirty = None;
+            }
+        }
+    }
     fn tight(&mut self, input: &mut impl Read, frame: &mut Frame, rect: Damage) -> io::Result<()> {
         let w = rect.right - rect.x;
         let h = rect.bottom - rect.y;
@@ -499,6 +559,89 @@ pub fn pointer(mask: u8, x: u16, y: u16) -> [u8; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resized_desktops_are_not_published_until_every_pixel_has_arrived() {
+        fn update_packet(x: u16, y: u16, w: u16, h: u16, encoding: i32, payload: &[u8]) -> Vec<u8> {
+            let mut bytes = vec![0, 0, 0, 1];
+            for value in [x, y, w, h] {
+                bytes.extend(value.to_be_bytes());
+            }
+            bytes.extend(encoding.to_be_bytes());
+            bytes.extend(payload);
+            bytes
+        }
+        let mut frame = Frame {
+            width: 2,
+            height: 2,
+            rgba: vec![255; 16],
+            layout: None,
+            dirty: None,
+        };
+        let mut decoder = Decoder::default();
+        let mut layout = vec![1, 0, 0, 0];
+        layout.extend(7u32.to_be_bytes());
+        for value in [0u16, 0, 65, 2] {
+            layout.extend(value.to_be_bytes());
+        }
+        layout.extend(0u32.to_be_bytes());
+        update(
+            &mut &update_packet(0, 0, 65, 2, -308, &layout)[..],
+            &mut frame,
+            &mut decoder,
+        )
+        .unwrap();
+        assert!(
+            frame.dirty.is_none(),
+            "a size notification must never publish its zero-filled buffer"
+        );
+        assert!(decoder.needs_full_frame());
+        let first_row = update_packet(0, 0, 65, 1, 0, &[30, 20, 10, 0].repeat(65));
+        for _ in 0..2 {
+            // overlapping updates must not count the same pixels twice
+            update(&mut &first_row[..], &mut frame, &mut decoder).unwrap();
+            assert!(frame.dirty.is_none());
+        }
+        update(
+            &mut &update_packet(0, 1, 64, 1, 0, &[60, 50, 40, 0].repeat(64))[..],
+            &mut frame,
+            &mut decoder,
+        )
+        .unwrap();
+        assert!(frame.dirty.is_none());
+        update(
+            &mut &update_packet(64, 1, 1, 1, 0, &[90, 80, 70, 0])[..],
+            &mut frame,
+            &mut decoder,
+        )
+        .unwrap();
+        assert_eq!(
+            frame.dirty,
+            Some(Damage {
+                x: 0,
+                y: 0,
+                right: 65,
+                bottom: 2
+            })
+        );
+        assert!(!decoder.needs_full_frame());
+        assert!(frame.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        update(
+            &mut &update_packet(0, 0, 1, 1, 0, &[1, 2, 3, 0])[..],
+            &mut frame,
+            &mut decoder,
+        )
+        .unwrap();
+        assert_eq!(
+            frame.dirty,
+            Some(Damage {
+                x: 0,
+                y: 0,
+                right: 1,
+                bottom: 1
+            })
+        );
+    }
 
     #[test]
     fn negotiates_and_applies_partial_frame() {

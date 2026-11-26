@@ -418,6 +418,7 @@ impl Rectangle {
             let owner = self.tabs.iter().position(|tab| {
                 tab.agent_owner.is_none()
                     && tab.ran
+                    && tab.preferences.ready
                     && self
                         .workspace_key(tab)
                         .is_some_and(|key| key.same_profile(&pane.key))

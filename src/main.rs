@@ -19,6 +19,7 @@ mod navigation;
 mod preferences;
 mod preview;
 mod proton;
+mod resize;
 mod rfb;
 mod saved;
 mod session;
@@ -379,8 +380,7 @@ struct Tab {
     agent_parent_title: Option<String>,
     file_editor: Option<u16>,
     explorer: files::Explorer,
-    resize_target: Option<(rfb::Resolution, Instant)>,
-    resize_sent: Option<rfb::Resolution>,
+    sizing: resize::Sizing,
     snap: Option<Snap>,
     audio: Option<audio::Audio>,
     audio_error: Option<String>,
@@ -537,8 +537,7 @@ impl Tab {
         self.navigation = None;
         self.page_rect = None;
         self.preview = None;
-        self.resize_target = None;
-        self.resize_sent = None;
+        self.sizing = resize::Sizing::default();
         self.audio = None;
         self.clipboard = None;
         self.memory = None;
@@ -631,7 +630,12 @@ impl Tab {
             }
             self.size = size;
         }
-        if self.texture.is_some() && self.memory.is_none() && !self.memory_failed {
+        if self.texture.is_some()
+            && (self.sizing.presented()
+                || (self.agent_view == AgentView::Files && self.preferences.ready))
+            && self.memory.is_none()
+            && !self.memory_failed
+        {
             let repaint = ctx.clone();
             match memory::Meter::start(
                 self.connection.host.trim(),
@@ -1520,11 +1524,7 @@ impl Rectangle {
                     title: kind.label().into(),
                     agent_port: Some(port),
                     codex: owner.codex,
-                    agent_resolution: if owner.codex {
-                        AgentResolution::Qhd
-                    } else {
-                        AgentResolution::MatchTile
-                    },
+                    agent_resolution: owner.agent_resolution,
                     agent_view: kind,
                     agent_owner: Some(owner_id),
                     agent_parent_title: Some(owner.title.clone()),
@@ -3310,21 +3310,33 @@ impl Rectangle {
                 ui.label("Checking for parked tabs…");
             });
             return;
-        } else if matches!(&self.job, Some((Job::CloneTab(..), _))) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Cloning tab… The source will resume when the copy is ready.");
-            });
+        }
+        let progress = if matches!(&self.job, Some((Job::CloneTab(..), _))) {
+            Some("Cloning tab… The source will resume when the copy is ready.")
         } else if matches!(&self.job, Some((Job::PrepareAgentMedia(..), _))) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Preparing shared folders… Large folders may take a while.");
-            });
+            Some("Preparing shared folders… Large folders may take a while.")
         } else if self.job.is_some() && (self.home || block_input) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Working with the session host…");
-            });
+            Some("Working with the session host…")
+        } else {
+            None
+        };
+        if let Some(message) = progress {
+            // Transient jobs must not subtract a row from every desktop and
+            // then expand them all again when the job completes.
+            let area = ui.available_rect_before_wrap();
+            egui::Area::new(egui::Id::new("session progress"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(area.left_top() + Vec2::splat(8.0))
+                .interactable(false)
+                .show(&ctx, |ui| {
+                    ui.set_max_width(area.width().min(450.0).max(80.0));
+                    design::frame(design::SURFACE, 8, 8).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spinner();
+                            ui.label(message);
+                        });
+                    });
+                });
         }
         if self.home || self.tabs.is_empty() {
             self.home_library(ui, &ctx, block_input, None);
@@ -3403,6 +3415,25 @@ impl Rectangle {
         if filled_vacancy {
             return;
         }
+        let waiting_for_selected = self.workspace_state.focus_pending
+            && self
+                .workspace_state
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.active.as_ref())
+                .is_some_and(|key| {
+                    !self
+                        .tabs
+                        .iter()
+                        .any(|tab| self.workspace_key(tab).as_ref() == Some(key))
+                })
+            && (!self.startup.is_empty()
+                || self.job.is_some()
+                || self
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.session.is_some() && (!tab.ran || !tab.preferences.ready)));
+        let sizing_ready = !waiting_for_selected;
         let mut edit_file = None;
         for (index, pane) in panes {
             let Some(tab) = self.tabs.get_mut(index) else {
@@ -3471,6 +3502,7 @@ impl Rectangle {
                         tab,
                         !show_cursor,
                         show_cursor && !address_focused && index == self.active,
+                        sizing_ready,
                     );
                 },
             );
@@ -4319,9 +4351,11 @@ impl Rectangle {
         tab: &mut Tab,
         block_input: bool,
         interactive: bool,
+        layout_ready: bool,
     ) {
         tab.page_rect = None;
         if interactive
+            && tab.sizing.presented()
             && tab.texture.is_some()
             && tab.clipboard.is_none()
             && tab.clipboard_error.is_none()
@@ -4344,9 +4378,6 @@ impl Rectangle {
                 Ok(clipboard) => tab.clipboard = Some(clipboard),
                 Err(_) => tab.clipboard_error = Some("Could not open the clipboard connection."),
             }
-        }
-        if let Some(error) = tab.clipboard_error {
-            ui.label(RichText::new(error).color(MUTED).small());
         }
         if let Some(port) = tab.agent_port {
             ui.label(
@@ -4380,31 +4411,72 @@ impl Rectangle {
                 tile
             };
             let now = Instant::now();
-            if tab.resize_target.is_none_or(|(size, _)| size != desired) {
-                tab.resize_target = Some((desired, now));
-                tab.resize_sent = None;
-            }
             let can_resize = tab.session.as_ref().is_some_and(Session::supports_resize);
-            if can_resize && [desired.0, desired.1] != tab.size && tab.resize_sent != Some(desired)
-            {
-                let delay = Duration::from_millis(150);
-                let elapsed = now - tab.resize_target.unwrap().1;
-                if elapsed < delay {
-                    ctx.request_repaint_after(delay - elapsed);
-                } else if tab
+            let remote = tab
+                .session
+                .as_ref()
+                .and_then(Session::desktop_size)
+                .unwrap_or(rfb::Resolution(tab.size[0], tab.size[1]));
+            let known_mode = tab.preferences.received
+                || tab
+                    .preferences
+                    .changed_locally(if tab.agent_port.is_some() {
+                        preferences::Field::Resolution
+                    } else {
+                        preferences::Field::Smooth
+                    });
+            let tolerance =
+                if tab.agent_port.is_none() || tab.agent_resolution == AgentResolution::MatchTile {
+                    1
+                } else {
+                    0
+                };
+            let plan = tab.sizing.plan(
+                now,
+                desired,
+                remote,
+                rfb::Resolution(tab.size[0], tab.size[1]),
+                tab.preferences.ready && layout_ready && !ctx.will_discard(),
+                can_resize && known_mode,
+                tolerance,
+            );
+            if let Some(delay) = plan.repaint_after {
+                ctx.request_repaint_after(delay);
+            }
+            if let Some(size) = plan.request {
+                if tab
                     .session
                     .as_ref()
-                    .is_some_and(|session| session.resize(desired))
+                    .is_some_and(|session| session.resize(size))
                 {
-                    tab.resize_sent = Some(desired);
-                } else {
-                    ctx.request_repaint_after(delay);
+                    tab.sizing.sent(size, now);
                 }
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
+            if !plan.show {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
+                    design::loading(
+                        ui,
+                        "Restoring display…",
+                        tab.started
+                            .map_or(0.0, |start| start.elapsed().as_secs_f32()),
+                    );
+                });
+                return;
             }
             // A resize is asynchronous, and older parked desktops can't resize.
             let rect = design::fit_desktop(pane, tab.size);
             tab.page_rect = Some(rect);
             design::display(ui, texture.id(), rect);
+            if let Some(error) = tab.clipboard_error {
+                ui.painter().with_clip_rect(pane).text(
+                    pane.left_bottom() + Vec2::new(8.0, -8.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    error,
+                    egui::FontId::proportional(12.0),
+                    MUTED,
+                );
+            }
             if !can_resize
                 && [desired.0, desired.1] != tab.size
                 && tab
@@ -4513,6 +4585,51 @@ fn keysym(key: Key, modified: bool) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_restore_jobs_do_not_change_the_display_area() {
+        let ctx = egui::Context::default();
+        design::theme(&ctx);
+        let size = rfb::Resolution(1024, 640);
+        let now = Instant::now();
+        let mut sizing = resize::Sizing::default();
+        sizing.plan(now - resize::SETTLE, size, size, size, true, false, 0);
+        sizing.plan(now, size, size, size, true, false, 0);
+        let mut preferences = preferences::State::default();
+        preferences.ready = true;
+        preferences.received = true;
+        let mut app = Rectangle {
+            tabs: vec![Tab {
+                id: 1,
+                size: [size.0, size.1],
+                sizing,
+                preferences,
+                texture: Some(ctx.load_texture(
+                    "test desktop",
+                    egui::ColorImage::filled([4, 4], INK),
+                    egui::TextureOptions::LINEAR,
+                )),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut areas = Vec::new();
+        for busy in [false, true, false] {
+            let (_send, receive) = std::sync::mpsc::channel();
+            app.job = busy.then_some((Job::CloneTab(Backend::Primary), receive));
+            // Keep the dummy job alive without contacting a host.
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 900.0))),
+                    ..Default::default()
+                },
+                |ui| app.workspace(ui),
+            );
+            areas.push(app.tabs[0].page_rect.unwrap());
+        }
+        assert_eq!(areas[0], areas[1]);
+        assert_eq!(areas[1], areas[2]);
+    }
 
     #[test]
     fn agent_resolution_selects_fixed_modes_or_tracks_tile_and_monitor_pixels() {
