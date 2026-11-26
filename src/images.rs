@@ -2,6 +2,7 @@ use std::io;
 
 pub const BROWSER: &str = include_str!("../server/Dockerfile");
 pub const AGENT: &str = include_str!("../server/Dockerfile.agent");
+pub const APPLICATION: &str = include_str!("../server/Dockerfile.application");
 pub const CODEX: &str = include_str!("../server/Dockerfile.codex");
 
 #[derive(Clone)]
@@ -16,6 +17,7 @@ impl AgentImage {
         let name = name.trim();
         if !name.eq_ignore_ascii_case("Browser")
             && !name.eq_ignore_ascii_case("Agent")
+            && !name.eq_ignore_ascii_case("Application")
             && crate::saved::title(name).is_some()
             && !images
                 .iter()

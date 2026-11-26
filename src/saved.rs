@@ -9,6 +9,7 @@ use std::{
 #[derive(Clone)]
 pub struct Entry {
     pub codex: bool,
+    pub application: bool,
     pub id: String,
     pub title: String,
     pub startup_page: String,
@@ -19,6 +20,7 @@ pub struct Entry {
 #[derive(Clone)]
 pub struct Parked {
     pub codex: bool,
+    pub application: bool,
     pub agent_port: Option<u16>,
     pub file_manager: bool,
     pub always_on: bool,
@@ -47,6 +49,7 @@ pub fn parse_parked(output: &str) -> io::Result<Vec<Parked>> {
             title(&name)?;
             Some(Parked {
                 codex: layout.iter().skip(2).any(|item| *item == "codex"),
+                application: layout.iter().skip(2).any(|item| *item == "application"),
                 agent_port: layout.get(1).and_then(|port| port.parse().ok()),
                 always_on: layout.iter().skip(2).any(|item| *item == "always-on"),
                 file_manager: layout.iter().skip(2).any(|item| *item == "files"),
@@ -94,6 +97,24 @@ fn codex_sessions_keep_their_app_when_saved_and_parked() {
     ))
     .unwrap();
     assert!(parked[0].codex && parked[0].always_on && parked[0].file_manager);
+}
+
+#[test]
+fn application_sessions_keep_the_desktop_when_saved_and_parked() {
+    let id = "1234567890abcdef1234567890abcdef";
+    let saved = parse(&format!(
+        "RECTSAVED2\n{id} 47616d6573 agent:application:4010\n"
+    ))
+    .unwrap();
+    assert!(saved[0].application && !saved[0].codex && !saved[0].file_manager);
+    assert_eq!(saved[0].agent_port, Some(4010));
+
+    let parked = parse_parked(&format!(
+        "RECTPARK1\n{id} 47616d6573 {id} 0 - 4010 application always-on\n"
+    ))
+    .unwrap();
+    assert!(parked[0].application && parked[0].always_on);
+    assert_eq!(parked[0].agent_port, Some(4010));
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -144,7 +165,7 @@ pub fn parse(output: &str) -> io::Result<Vec<Entry>> {
             let agent_port = if let Some(agent) = page.strip_prefix("agent:") {
                 let agent = agent.strip_suffix(":files").unwrap_or(agent);
                 let (image, port) = agent.split_once(':')?;
-                if !matches!(image, "demo" | "codex") && !valid_id(image) {
+                if !matches!(image, "demo" | "codex" | "application") && !valid_id(image) {
                     return None;
                 }
                 Some(port.parse::<u16>().ok().filter(|port| *port >= 1024)?)
@@ -153,6 +174,7 @@ pub fn parse(output: &str) -> io::Result<Vec<Entry>> {
             };
             Some(Entry {
                 codex: page.starts_with("agent:codex:"),
+                application: page.starts_with("agent:application:"),
                 id: id.to_owned(),
                 title: name,
                 startup_page: decode(page, 4096).unwrap_or_default(),

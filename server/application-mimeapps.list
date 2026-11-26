@@ -1,0 +1,7 @@
+[Default Applications]
+x-scheme-handler/http=rectangle-agent-browser.desktop
+x-scheme-handler/https=rectangle-agent-browser.desktop
+text/html=rectangle-agent-browser.desktop
+application/x-ms-dos-executable=rectangle-wine.desktop;
+application/x-msdownload=rectangle-wine.desktop;
+application/x-msi=rectangle-wine.desktop;

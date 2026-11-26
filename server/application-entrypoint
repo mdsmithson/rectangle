@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+umask 077
+mkdir -p "$HOME/workspace"
+test -w "$XDG_RUNTIME_DIR"
+mkdir -m 1777 /tmp/.X11-unix
+mkdir -m 700 /tmp/rectangle-pulse
+cat > /tmp/rectangle-pulse/config.pa <<'PULSE'
+load-module module-native-protocol-unix socket=/tmp/rectangle-pulse/native
+load-module module-null-sink sink_name=rectangle rate=48000 channels=2
+set-default-sink rectangle
+PULSE
+pulseaudio -n -F /tmp/rectangle-pulse/config.pa --daemonize=no --exit-idle-time=-1 \
+    --disallow-exit --disallow-module-loading --log-target=stderr </dev/null >&2 &
+Xvnc "$DISPLAY" -geometry "${RECTANGLE_WIDTH:-1024}x${RECTANGLE_HEIGHT:-640}" -depth 24 \
+    -nolisten tcp -localhost -rfbport 5900 -SecurityTypes None \
+    -AcceptSetDesktopSize=1 -AcceptCutText=0 -SendCutText=0 </dev/null >&2 &
+display_pid=$!
+for i in $(seq 1 60); do
+    [ ! -S /tmp/.X11-unix/X99 ] || break
+    kill -0 "$display_pid" 2>/dev/null || exit 1
+    sleep .1
+done
+[ -S /tmp/.X11-unix/X99 ]
+xdg-user-dirs-update
+cd "$HOME/workspace"
+git init -q
+exec dbus-run-session -- xfce4-session

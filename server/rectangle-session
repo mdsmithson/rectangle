@@ -40,6 +40,7 @@ proton_helper="$HOME/.local/bin/rectangle-proton"
 rectangle_browser_image=rectangle-browser:demo
 rectangle_agent_image=rectangle-agent:demo
 rectangle_codex_image=rectangle-codex:demo
+rectangle_application_image=
 rectangle_vpn_image=rectangle-vpn:demo
 rectangle_egress_image=rectangle-egress:demo
 if [ -n "${RECTANGLE_RELEASE_DIR:-}" ]; then
@@ -205,7 +206,10 @@ except (OSError, ValueError, subprocess.SubprocessError) as error:
             case $layout in left|right|tl|tr|bl|br) ;; *) layout=- ;; esac
             if [ "$layout" != - ] || [ -n "$agent_port$always_on" ]; then printf ' %s' "$layout"; fi
             if [ -n "$agent_port" ]; then printf ' %s' "$agent_port"; fi
-            if [ -n "$agent_port" ] && [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-flavor"}}' "rectangle-tab-$id")" = codex ]; then printf ' codex'; fi
+            if [ -n "$agent_port" ]; then
+                flavor=$(docker inspect -f '{{index .Config.Labels "rectangle.agent-flavor"}}' "rectangle-tab-$id")
+                case $flavor in codex|application) printf ' %s' "$flavor" ;; esac
+            fi
             if [ -n "$always_on" ]; then
                 [ -n "$agent_port" ] || printf ' -'
                 printf ' %s' "$always_on"
@@ -407,6 +411,7 @@ EOF
                 case $agent_image in
                     rectangle-agent:build-*) agent_image=rectangle-agent:demo ;;
                     rectangle-codex:*) agent_image=rectangle-agent:codex ;;
+                    rectangle-application:*) agent_image=rectangle-agent:application ;;
                 esac
                 page="agent:${agent_image#rectangle-agent:}:$port"
                 if [ "$(docker inspect -f '{{index .Config.Labels "rectangle.agent-view"}}' "$container")" = files ]; then
@@ -775,6 +780,13 @@ parse_agent() {
     case $image_id in
         demo) image=$rectangle_agent_image ;;
         codex) image=$rectangle_codex_image ;;
+        application)
+            [ "$agent_view" != files ] || bad_resolution
+            image=$rectangle_application_image
+            [ -n "$image" ] || { echo 'Application tabs require a Rectangle 0.1.34 or newer x86-64 server.' >&2; exit 1; }
+            agent_view=desktop
+            memory_mib=6144
+            ;;
         *) valid_token "$image_id" || bad_resolution; image="rectangle-agent:$image_id" ;;
     esac
 }
@@ -1016,6 +1028,10 @@ except OSError as err:
     sys.exit(f"Could not bind Agent port {sys.argv[2]} to {sys.argv[1]}: {err.strerror}.")
 ' "$bind_ip" "$agent_port"
     network_mode=bridge
+    if [ "$image_id" = application ]; then
+        # Debian Wine checks /run/user/<uid> even when TMPDIR is set.
+        set -- "$@" --tmpfs /run/user/10001:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=10001,gid=10001
+    fi
     set -- "$@" --publish "$bind_ip:$agent_port:$agent_port/tcp" \
         --label "rectangle.agent-port=$agent_port" --env "PORT=$agent_port" \
         --label "rectangle.agent-flavor=$image_id" \

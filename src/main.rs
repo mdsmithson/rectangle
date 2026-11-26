@@ -148,6 +148,7 @@ enum AgentView {
     #[default]
     Freebuff,
     Codex,
+    Desktop,
     Browser,
     Files,
     Shell,
@@ -160,6 +161,7 @@ impl AgentView {
         match self {
             Self::Freebuff => "freebuff",
             Self::Codex => "codex",
+            Self::Desktop => "main",
             Self::Browser => "browser",
             Self::Files => "files",
             Self::Shell => "sh",
@@ -170,6 +172,7 @@ impl AgentView {
         match self {
             Self::Freebuff => "Freebuff Terminal",
             Self::Codex => "ChatGPT Codex",
+            Self::Desktop => "Application",
             Self::Browser => "Browser",
             Self::Files => "File Manager",
             Self::Shell => "SH Terminal",
@@ -178,10 +181,18 @@ impl AgentView {
 }
 
 impl Tab {
+    fn has_audio(&self) -> bool {
+        self.agent_port.is_none() || self.agent_view == AgentView::Desktop
+    }
+
     fn terminal_view(&self) -> Option<String> {
         self.agent_port?;
         match (self.agent_view, self.agent_owner, self.file_editor) {
-            (AgentView::Files | AgentView::Browser | AgentView::Codex, _, _) => None,
+            (
+                AgentView::Files | AgentView::Browser | AgentView::Codex | AgentView::Desktop,
+                _,
+                _,
+            ) => None,
             (_, _, Some(display)) => Some(format!("edit{display}")),
             (_, None, _) => Some("main".into()),
             (view, Some(_), _) => Some(view.command().into()),
@@ -1163,7 +1174,9 @@ impl Rectangle {
                     } else {
                         TabResolution::MatchTile
                     },
-                    agent_view: if entry.file_manager {
+                    agent_view: if entry.application {
+                        AgentView::Desktop
+                    } else if entry.file_manager {
                         AgentView::Files
                     } else if entry.codex {
                         AgentView::Codex
@@ -1261,7 +1274,7 @@ impl Rectangle {
 
     fn sync_audio(&mut self, ctx: &egui::Context) {
         for tab in &mut self.tabs {
-            if tab.agent_port.is_some() {
+            if !tab.has_audio() {
                 continue;
             }
             let live = tab.session.as_ref().filter(|session| {
@@ -1345,6 +1358,10 @@ impl Rectangle {
             || entry.as_ref().is_some_and(|entry| entry.file_manager);
         let codex = matches!(&address, Some(session::StartPage::Agent("codex", _, _)))
             || entry.as_ref().is_some_and(|entry| entry.codex);
+        let application = matches!(
+            &address,
+            Some(session::StartPage::Agent("application", _, _))
+        ) || entry.as_ref().is_some_and(|entry| entry.application);
         if file_manager {
             size = rfb::Resolution::FALLBACK;
         } else if codex {
@@ -1392,7 +1409,9 @@ impl Rectangle {
                     } else {
                         TabResolution::MatchTile
                     },
-                    agent_view: if file_manager {
+                    agent_view: if application {
+                        AgentView::Desktop
+                    } else if file_manager {
                         AgentView::Files
                     } else if codex {
                         AgentView::Codex
@@ -2060,16 +2079,14 @@ impl Rectangle {
             && let Ok(port) = draft.port.trim().parse::<u16>()
             && port >= 1024
         {
-            if draft.image <= 2 {
-                self.launch_agent(
-                    ctx,
-                    draft.backend,
-                    if draft.codex { "codex" } else { "demo" },
-                    name,
-                    port,
-                    draft.image == 2,
-                );
-            } else if let Some(image) = self.agent_images.get(draft.image - 3).cloned() {
+            if draft.image <= 3 {
+                let flavor = match draft.image {
+                    3 => "application",
+                    _ if draft.codex => "codex",
+                    _ => "demo",
+                };
+                self.launch_agent(ctx, draft.backend, flavor, name, port, draft.image == 2);
+            } else if let Some(image) = self.agent_images.get(draft.image - 4).cloned() {
                 self.request_with_input(
                     ctx,
                     Job::BuildAgent(draft.backend, image.id.clone(), name.to_owned(), port, slot),
@@ -2168,7 +2185,7 @@ impl Rectangle {
                         }
                     }
                 });
-                let names: Vec<_> = ["Browser", "Agent", "File Manager"].into_iter().chain(self.agent_images.iter().map(|image| image.name.as_str())).collect();
+                let names: Vec<_> = ["Browser", "Agent", "File Manager", "Application"].into_iter().chain(self.agent_images.iter().map(|image| image.name.as_str())).collect();
                 ui.horizontal(|ui| {
                     ui.label("Image");
                     egui::ComboBox::from_id_salt("new-tab-image")
@@ -2182,12 +2199,13 @@ impl Rectangle {
                                 }
                             }
                         });
-                    if ui.button(if draft.image == 0 { "View Dockerfile" } else { "Edit Dockerfile" }).clicked() {
+                    if ui.button(if matches!(draft.image, 0 | 3) { "View Dockerfile" } else { "Edit Dockerfile" }).clicked() {
                         draft.dockerfile = Some(match draft.image {
                             0 => images::BROWSER.to_owned(),
                             1 | 2 if draft.codex => images::CODEX.to_owned(),
                             1 | 2 => images::AGENT.to_owned(),
-                            index => self.agent_images[index - 3].dockerfile.clone(),
+                            3 => images::APPLICATION.to_owned(),
+                            index => self.agent_images[index - 4].dockerfile.clone(),
                         });
                     }
                 });
@@ -2203,7 +2221,12 @@ impl Rectangle {
                             }
                         });
                     }
-                    ui.label(if draft.image == 2 { "Agent workspace in a file explorer" } else if draft.codex { "ChatGPT Codex desktop app · Debian 13" } else { "Alpine terminal with Node.js and Freebuff" });
+                    ui.label(match draft.image {
+                        2 => "Agent workspace in a file explorer",
+                        3 => "Debian desktop with Wine and Agent coding tools",
+                        _ if draft.codex => "ChatGPT Codex desktop app · Debian 13",
+                        _ => "Alpine terminal with Node.js and Freebuff",
+                    });
                     ui.horizontal(|ui| {
                         ui.label("Tab name");
                         ui.add(egui::TextEdit::singleline(&mut draft.name).hint_text("Required"));
@@ -2219,15 +2242,16 @@ impl Rectangle {
                         }
                     });
                     if let Some(error) = &draft.port_error { ui.label(RichText::new(error).color(Color32::LIGHT_RED)); }
-                    ui.label(RichText::new("Check Open ports for the host binding. Agent bypasses the browser VPN.").small().color(MUTED));
+                    ui.label(RichText::new("Check Open ports for the host binding. This tab uses the server network outside the Browser VPN.").small().color(MUTED));
                 }
                 if let Some(file) = &mut draft.dockerfile {
                     ui.separator();
-                    ui.label(if draft.image == 0 { "Browser Dockerfile · read only" } else { "Agent Dockerfile · save changes as a named copy" });
+                    let read_only = matches!(draft.image, 0 | 3);
+                    ui.label(if read_only { "Dockerfile · read only" } else { "Agent Dockerfile · save changes as a named copy" });
                     egui::ScrollArea::both().max_height((ctx.content_rect().height() - 240.0).clamp(100.0, 330.0)).show(ui, |ui| {
-                        ui.add(egui::TextEdit::multiline(file).code_editor().desired_width(ui.available_width()).desired_rows(9).interactive(draft.image != 0));
+                        ui.add(egui::TextEdit::multiline(file).code_editor().desired_width(ui.available_width()).desired_rows(9).interactive(!read_only));
                     });
-                    if draft.image != 0 {
+                    if !read_only {
                         ui.horizontal(|ui| {
                             ui.add(egui::TextEdit::singleline(&mut draft.copy_name).hint_text("New image name"));
                             if ui.button("Save as new image").clicked() { choice = 2; }
@@ -2238,8 +2262,8 @@ impl Rectangle {
                 if let Some(err) = &draft.error { ui.label(RichText::new(err).color(Color32::LIGHT_RED)); }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    let name = if draft.image > 2 { "Build and open" } else { "Open tab" };
-                    let source = match draft.image { 0 => images::BROWSER, 1 | 2 if draft.codex => images::CODEX, 1 | 2 => images::AGENT, index => &self.agent_images[index - 3].dockerfile };
+                    let name = if draft.image > 3 { "Build and open" } else { "Open tab" };
+                    let source = match draft.image { 0 => images::BROWSER, 1 | 2 if draft.codex => images::CODEX, 1 | 2 => images::AGENT, 3 => images::APPLICATION, index => &self.agent_images[index - 4].dockerfile };
                     let edits_saved = draft.dockerfile.as_ref().is_none_or(|draft| draft == source);
                     let valid_agent = draft.image == 0 || (saved::title(&draft.name).is_some() && draft.port.trim().parse::<u16>().is_ok_and(|port| port >= 1024));
                     if ui.add_enabled(self.job.is_none() && edits_saved && valid_agent && self.tabs.len() < MAX_TABS, egui::Button::new(name))
@@ -2433,7 +2457,7 @@ impl Rectangle {
                     match result {
                         Ok(image) => {
                             self.agent_images.push(image);
-                            draft.image = self.agent_images.len() + 2;
+                            draft.image = self.agent_images.len() + 3;
                             draft.dockerfile = None;
                             draft.copy_name.clear();
                             draft.error = None;
@@ -3702,22 +3726,23 @@ impl Rectangle {
                         let mut open = None;
                         let mut forget = None;
                         let mut edit_startup = None;
-                        for (is_agent, heading) in [(false, "Browsers"), (true, "Agents")] {
+                        for (heading, empty, agent, application) in [
+                            ("Browsers", "No saved Browser sessions.", false, false),
+                            ("Agents", "No saved Agent sessions.", true, false),
+                            ("Applications", "No saved Application sessions.", true, true),
+                        ] {
                             ui.heading(heading);
-                            if !entries
+                            let mut group = entries
                                 .iter()
-                                .any(|entry| entry.agent_port.is_some() == is_agent)
-                            {
-                                ui.label(if is_agent {
-                                    "No saved Agent sessions."
-                                } else {
-                                    "No saved Browser sessions."
-                                });
+                                .filter(|entry| {
+                                    entry.agent_port.is_some() == agent
+                                        && entry.application == application
+                                })
+                                .peekable();
+                            if group.peek().is_none() {
+                                ui.label(empty);
                             }
-                            for entry in entries
-                                .iter()
-                                .filter(|entry| entry.agent_port.is_some() == is_agent)
-                            {
+                            for entry in group {
                                 ui.push_id(&entry.id, |ui| {
                                     design::frame(Color32::from_rgb(26, 28, 34), 8, 4).show(
                                         ui,
@@ -3743,7 +3768,7 @@ impl Rectangle {
                                                             .on_hover_text("More session actions");
                                                         },
                                                     );
-                                                    if !is_agent
+                                                    if !agent
                                                         && ui
                                                             .add_enabled(
                                                                 !block_input && self.job.is_none(),
@@ -4154,17 +4179,18 @@ impl Rectangle {
                         }
                     }
                 });
-                if tab.agent_port.is_none() {
-                    if ui
+                if tab.agent_port.is_none()
+                    && ui
                         .selectable_label(tab.video_mode, "Smooth video (up to 1080p)")
                         .on_hover_text(
                             "Stream fewer display pixels for smoother motion in large panes.",
                         )
                         .clicked()
-                    {
-                        action = Some(TabAction::ToggleVideoMode);
-                        ui.close();
-                    }
+                {
+                    action = Some(TabAction::ToggleVideoMode);
+                    ui.close();
+                }
+                if tab.has_audio() {
                     let mut volume = tab.volume.unwrap_or(100);
                     if ui
                         .add(
@@ -4406,7 +4432,12 @@ impl Rectangle {
         if let Some(port) = tab.agent_port {
             ui.label(
                 RichText::new(format!(
-                    "Agent · {} · TCP {port}",
+                    "{} · {} · TCP {port}",
+                    if tab.agent_view == AgentView::Desktop {
+                        "Application"
+                    } else {
+                        "Agent"
+                    },
                     tab.backend.name(&tab.connection.host)
                 ))
                 .small()
@@ -4855,6 +4886,7 @@ mod tests {
                     .enumerate()
                     .map(|(i, title)| saved::Entry {
                         codex: false,
+                        application: false,
                         id: format!("{i:032x}"),
                         title: title.into(),
                         startup_page: String::new(),

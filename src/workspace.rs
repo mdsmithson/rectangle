@@ -696,6 +696,7 @@ mod tests {
                     profile: Some(root.key.profile.clone()),
                     title: "Agent".into(),
                     codex: false,
+                    application: false,
                     agent_port: Some(4007),
                     file_manager: false,
                     always_on: true,
