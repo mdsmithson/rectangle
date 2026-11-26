@@ -4645,13 +4645,14 @@ mod tests {
             let (_send, receive) = std::sync::mpsc::channel();
             app.job = busy.then_some((Job::CloneTab(Backend::Primary), receive));
             // Keep the dummy job alive without contacting a host.
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 900.0))),
                     ..Default::default()
                 },
                 |ui| app.workspace(ui),
             );
+            output.textures_delta.clear();
             areas.push(app.tabs[0].page_rect.unwrap());
         }
         assert_eq!(areas[0], areas[1]);
