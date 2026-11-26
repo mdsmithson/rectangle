@@ -23,3 +23,7 @@
 !rectangle-autoconfig.js
 !rectangle.cfg
 !navigation-stream.py
+!Dockerfile.application
+!application-entrypoint
+!application-wine.desktop
+!application-mimeapps.list

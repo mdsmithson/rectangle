@@ -188,9 +188,11 @@ impl Tab {
     fn terminal_view(&self) -> Option<String> {
         self.agent_port?;
         match (self.agent_view, self.agent_owner, self.file_editor) {
-            (AgentView::Files | AgentView::Browser | AgentView::Codex | AgentView::Desktop, _, _) => {
-                None
-            }
+            (
+                AgentView::Files | AgentView::Browser | AgentView::Codex | AgentView::Desktop,
+                _,
+                _,
+            ) => None,
             (_, _, Some(display)) => Some(format!("edit{display}")),
             (_, None, _) => Some("main".into()),
             (view, Some(_), _) => Some(view.command().into()),
@@ -1356,8 +1358,10 @@ impl Rectangle {
             || entry.as_ref().is_some_and(|entry| entry.file_manager);
         let codex = matches!(&address, Some(session::StartPage::Agent("codex", _, _)))
             || entry.as_ref().is_some_and(|entry| entry.codex);
-        let application = matches!(&address, Some(session::StartPage::Agent("application", _, _)))
-            || entry.as_ref().is_some_and(|entry| entry.application);
+        let application = matches!(
+            &address,
+            Some(session::StartPage::Agent("application", _, _))
+        ) || entry.as_ref().is_some_and(|entry| entry.application);
         if file_manager {
             size = rfb::Resolution::FALLBACK;
         } else if codex {
@@ -2081,14 +2085,7 @@ impl Rectangle {
                     _ if draft.codex => "codex",
                     _ => "demo",
                 };
-                self.launch_agent(
-                    ctx,
-                    draft.backend,
-                    flavor,
-                    name,
-                    port,
-                    draft.image == 2,
-                );
+                self.launch_agent(ctx, draft.backend, flavor, name, port, draft.image == 2);
             } else if let Some(image) = self.agent_images.get(draft.image - 4).cloned() {
                 self.request_with_input(
                     ctx,
@@ -3735,10 +3732,13 @@ impl Rectangle {
                             ("Applications", "No saved Application sessions.", true, true),
                         ] {
                             ui.heading(heading);
-                            let mut group = entries.iter().filter(|entry| {
-                                entry.agent_port.is_some() == agent
-                                    && entry.application == application
-                            }).peekable();
+                            let mut group = entries
+                                .iter()
+                                .filter(|entry| {
+                                    entry.agent_port.is_some() == agent
+                                        && entry.application == application
+                                })
+                                .peekable();
                             if group.peek().is_none() {
                                 ui.label(empty);
                             }

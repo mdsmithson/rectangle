@@ -26,7 +26,7 @@ IMAGES = {
               "agent-mimeapps.list", "clipboard-stream.py", "memory-stream.py"),
     "application": ("Dockerfile.application", "application-entrypoint", "agent-browser",
                     "agent-browser.desktop", "application-wine.desktop", "application-mimeapps.list",
-                    "audio-stream", "clipboard-stream.py", "memory-stream.py"),
+                    "audio-stream", "clipboard-stream.py", "memory-stream.py", ".dockerignore"),
     "egress": ("Dockerfile.egress", "egress.py"),
     "vpn": ("Dockerfile.vpn", "egress.py", "vpn.py"),
     "proton": ("Dockerfile.proton", "egress.py", "proton.py"),
